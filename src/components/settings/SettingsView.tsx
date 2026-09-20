@@ -347,7 +347,7 @@ export function SettingsView({ initialSettings }: SettingsViewProps) {
                     setBranding((prev) => ({ ...prev, company_name: e.target.value }))
                   }
                   className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:bg-white focus:border-blue-500 focus:outline-none transition-colors"
-                  placeholder="Falcon - فلكون"
+                  placeholder="فلكون"
                 />
               </div>
 
@@ -397,24 +397,15 @@ export function SettingsView({ initialSettings }: SettingsViewProps) {
               <div className="bg-white border-2 border-black rounded-lg p-3 text-black">
                 <div className="flex items-center justify-between border-b-2 border-black pb-2 mb-2">
                   <div className="flex items-center gap-2">
-                    {logoPreview ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={logoPreview}
-                        alt="Falcon Logo"
-                        className="h-8 w-auto object-contain grayscale"
-                      />
-                    ) : (
-                      <div className="border border-black px-2 py-0.5 rounded font-black text-xs">
-                        🦅
-                      </div>
-                    )}
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={logoPreview || "/falcon-logo.png"}
+                      alt="فلكون"
+                      className="h-8 w-auto object-contain"
+                    />
                     <div>
                       <span className="text-sm font-black tracking-tight leading-none block">
-                        {branding.company_name || "Falcon - فلكون"}
-                      </span>
-                      <span className="text-[9px] font-bold text-black leading-none block mt-0.5">
-                        {branding.slogan || "شحن لوجستي سريع"}
+                        {branding.company_name || "فلكون"}
                       </span>
                     </div>
                   </div>

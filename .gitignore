@@ -11,6 +11,7 @@
 
 # Production Output
 /dist
+/.open-next/
 
 # Debug Logs
 npm-debug.log*

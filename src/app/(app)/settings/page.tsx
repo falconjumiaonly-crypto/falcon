@@ -11,9 +11,9 @@ export default async function SettingsPage() {
 
   const fallbackSettings = {
     branding: {
-      company_name: "Falcon - فلكون",
-      slogan: "شحن لوجستي سريع وموثوق",
-      logo_url: null,
+      company_name: "فلكون",
+      slogan: "",
+      logo_url: "/falcon-logo.png",
     },
     companyInfo: {
       sender_phone: "01000000000",

@@ -40,24 +40,15 @@ export function ShippingLabel({
         {/* Header Row: Falcon Branding & Order Date */}
         <div className="flex items-center justify-between border-b-2 border-black pb-1.5 mb-1.5">
           <div className="flex items-center gap-2">
-            {logoUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={logoUrl}
-                alt="Falcon"
-                className="h-7 w-auto object-contain grayscale"
-              />
-            ) : (
-              <div className="border border-black px-1.5 py-0.5 rounded font-black text-xs">
-                🦅
-              </div>
-            )}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={logoUrl || "/falcon-logo.png"}
+              alt="فلكون"
+              className="h-7 w-auto object-contain"
+            />
             <div>
               <span className="text-base font-black tracking-tight leading-none block">
-                {companyName || "Falcon - فلكون"}
-              </span>
-              <span className="text-[10px] font-bold text-black leading-none block mt-0.5">
-                شحن لوجستي سريع
+                {companyName || "فلكون"}
               </span>
             </div>
           </div>
