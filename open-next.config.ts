@@ -20,6 +20,7 @@ const config: OpenNextConfig = {
       proxyExternalRequest: "fetch",
       incrementalCache: "dummy",
       tagCache: "dummy",
+      queue: "dummy",
     },
   },
 };
