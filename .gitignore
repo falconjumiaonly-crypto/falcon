@@ -32,3 +32,6 @@ Thumbs.db
 
 # Vercel Deployment
 .vercel
+
+.vercel
+.env*
