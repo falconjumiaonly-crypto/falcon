@@ -9,6 +9,7 @@ import {
   FileSpreadsheet,
   Printer,
   CheckCircle2,
+  Coins,
   Wallet,
   Settings,
   LogOut,
@@ -51,6 +52,11 @@ const navItems = [
     name: "تم الطباعة",
     href: "/print/archive",
     icon: CheckCircle2,
+  },
+  {
+    name: "المستحقات / Settlements",
+    href: "/settlements",
+    icon: Coins,
   },
   {
     name: "المالية والتسويات",

@@ -22,6 +22,10 @@ import {
   Phone,
   MapPin,
   FileText,
+  Truck,
+  Plus,
+  RotateCcw,
+  Search,
 } from "lucide-react";
 import {
   AppSettingsBundle,
@@ -30,14 +34,28 @@ import {
   saveWebhookConfigAction,
   uploadLogoAction,
   testWebhookAction,
+  saveShippingRatesAction,
 } from "@/app/actions/settings";
+import { DEFAULT_GOVERNORATES } from "@/lib/governorates";
+import { GovernorateRate } from "@/types/database";
 
 interface SettingsViewProps {
   initialSettings: AppSettingsBundle;
 }
 
 export function SettingsView({ initialSettings }: SettingsViewProps) {
-  const [activeTab, setActiveTab] = useState<"branding" | "shipping" | "api">("branding");
+  const [activeTab, setActiveTab] = useState<"branding" | "shipping" | "rates" | "api">("branding");
+
+  // Shipping Rates State
+  const [shippingRates, setShippingRates] = useState<GovernorateRate[]>(
+    initialSettings.shippingRates?.length ? initialSettings.shippingRates : DEFAULT_GOVERNORATES
+  );
+  const [govSearch, setGovSearch] = useState("");
+  const [showAddGov, setShowAddGov] = useState(false);
+  const [newGovName, setNewGovName] = useState("");
+  const [newGovRate, setNewGovRate] = useState<number | "">("");
+  const [newGovAliases, setNewGovAliases] = useState("");
+  const [isSavingRates, setIsSavingRates] = useState(false);
 
   // Branding State
   const [branding, setBranding] = useState(initialSettings.branding);
@@ -189,6 +207,79 @@ export function SettingsView({ initialSettings }: SettingsViewProps) {
     setTimeout(() => setCopiedKey(false), 2000);
   };
 
+  // Shipping Rates Handlers
+  const handleRateChange = (name: string, rate: number) => {
+    setShippingRates((prev) =>
+      prev.map((g) => (g.name === name ? { ...g, rate: Math.max(0, rate) } : g))
+    );
+  };
+
+  const handleAddGovernorate = () => {
+    if (!newGovName.trim()) {
+      showStatus("error", "يرجى كتابة اسم المحافظة أو المدينة");
+      return;
+    }
+    if (newGovRate === "" || isNaN(Number(newGovRate)) || Number(newGovRate) < 0) {
+      showStatus("error", "يرجى إدخال سعر شحن صالح");
+      return;
+    }
+
+    const aliases = newGovAliases
+      .split(/[,،]/)
+      .map((a) => a.trim())
+      .filter(Boolean);
+
+    const exists = shippingRates.some(
+      (g) => g.name.trim().toLowerCase() === newGovName.trim().toLowerCase()
+    );
+
+    if (exists) {
+      showStatus("error", "هذه المحافظة مسجلة بالفعل، يمكنك تعديل سعرها مباشرة");
+      return;
+    }
+
+    const newGov: GovernorateRate = {
+      name: newGovName.trim(),
+      rate: Number(newGovRate),
+      aliases: aliases.length > 0 ? aliases : undefined,
+    };
+
+    setShippingRates((prev) => [...prev, newGov]);
+    setNewGovName("");
+    setNewGovRate("");
+    setNewGovAliases("");
+    setShowAddGov(false);
+    showStatus("success", `تمت إضافة ${newGov.name} بنجاح`);
+  };
+
+  const handleRemoveGovernorate = (name: string) => {
+    setShippingRates((prev) => prev.filter((g) => g.name !== name));
+    showStatus("success", `تمت إزالة ${name}`);
+  };
+
+  const handleResetDefaultRates = () => {
+    if (confirm("هل تريد استعادة قائمة المحافظات والأسعار الافتراضية؟")) {
+      setShippingRates(DEFAULT_GOVERNORATES);
+      showStatus("success", "تمت استعادة الأسعار الافتراضية (لا تنسَ الضغط على حفظ الأسعار)");
+    }
+  };
+
+  const handleSaveShippingRates = async () => {
+    setIsSavingRates(true);
+    try {
+      const res = await saveShippingRatesAction(shippingRates);
+      if (res.success) {
+        showStatus("success", "تم حفظ أسعار الشحن لكافة المحافظات بنجاح في قاعدة البيانات!");
+      } else {
+        showStatus("error", res.error || "فشل حفظ أسعار الشحن");
+      }
+    } catch {
+      showStatus("error", "حدث خطأ أثناء حفظ أسعار الشحن");
+    } finally {
+      setIsSavingRates(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -245,6 +336,18 @@ export function SettingsView({ initialSettings }: SettingsViewProps) {
         >
           <MapPin className="w-4 h-4" />
           <span>بيانات المرسل والمرتجع</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab("rates")}
+          className={`px-4 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2 ${
+            activeTab === "rates"
+              ? "bg-blue-600 text-white shadow-md shadow-blue-600/20"
+              : "bg-white text-slate-600 hover:bg-slate-100 border border-slate-200"
+          }`}
+        >
+          <Truck className="w-4 h-4" />
+          <span>أسعار شحن المحافظات</span>
         </button>
 
         <button
@@ -759,6 +862,235 @@ export function SettingsView({ initialSettings }: SettingsViewProps) {
                 <span>{isPending ? "جاري الحفظ..." : "حفظ إعدادات الويب هوك"}</span>
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================= */}
+      {/* TAB: SHIPPING RATES                                       */}
+      {/* ========================================================= */}
+      {activeTab === "rates" && (
+        <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b pb-4">
+            <div>
+              <h2 className="text-lg font-bold text-slate-900">
+                أسعار الشحن الثابتة حسب المحافظة
+              </h2>
+              <p className="text-xs text-slate-500 mt-1">
+                حدد سعر الشحن لكل محافظة ليتم تطبيقه تلقائياً عند إنشاء الأوردرات أو استيرادها من Excel.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowAddGov((prev) => !prev)}
+                className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5"
+              >
+                <Plus className="w-4 h-4" />
+                <span>إضافة محافظة جديدة</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleResetDefaultRates}
+                className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5"
+                title="استعادة الأسعار الافتراضية للـ 27 محافظة المصرية"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>استعادة الافتراضي</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleSaveShippingRates}
+                disabled={isSavingRates}
+                className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl transition-all shadow-md shadow-blue-500/20 flex items-center gap-2 disabled:opacity-50"
+              >
+                {isSavingRates ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>جاري الحفظ...</span>
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-4 h-4" />
+                    <span>حفظ أسعار الشحن</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* New Governorate Form */}
+          {showAddGov && (
+            <div className="p-4 bg-blue-50/60 border border-blue-200 rounded-2xl space-y-4 animate-in fade-in duration-200">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-bold text-blue-900">إضافة محافظة أو منطقة جديدة</h3>
+                <button
+                  type="button"
+                  onClick={() => setShowAddGov(false)}
+                  className="text-xs text-slate-400 hover:text-slate-600"
+                >
+                  إلغاء
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    اسم المحافظة / المدينة *
+                  </label>
+                  <input
+                    type="text"
+                    value={newGovName}
+                    onChange={(e) => setNewGovName(e.target.value)}
+                    placeholder="مثال: مطروح أو الشيخ زايد"
+                    className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    سعر الشحن (ج.م) *
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={newGovRate}
+                    onChange={(e) =>
+                      setNewGovRate(e.target.value === "" ? "" : Number(e.target.value))
+                    }
+                    placeholder="75"
+                    className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    أسماء ومرادفات شائعة (مفصولة بفاصلة)
+                  </label>
+                  <input
+                    type="text"
+                    value={newGovAliases}
+                    onChange={(e) => setNewGovAliases(e.target.value)}
+                    placeholder="مرسى مطروح, مطروح"
+                    className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAddGov(false)}
+                  className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-200/60 rounded-lg"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAddGovernorate}
+                  className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg shadow-sm"
+                >
+                  إضافة للقائمة
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Search Filter */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="relative max-w-sm w-full">
+              <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={govSearch}
+                onChange={(e) => setGovSearch(e.target.value)}
+                placeholder="ابحث عن اسم محافظة أو مدينة..."
+                className="w-full pr-9 pl-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+              />
+            </div>
+
+            <span className="text-xs text-slate-400">
+              إجمالي المحافظات: {shippingRates.length}
+            </span>
+          </div>
+
+          {/* Governorates Rates Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {shippingRates
+              .filter(
+                (g) =>
+                  !govSearch ||
+                  g.name.includes(govSearch) ||
+                  g.aliases?.some((a) => a.includes(govSearch))
+              )
+              .map((g) => (
+                <div
+                  key={g.name}
+                  className="p-3.5 bg-slate-50/60 hover:bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between gap-3 transition-colors"
+                >
+                  <div className="space-y-1 min-w-0">
+                    <span className="text-xs font-bold text-slate-900 block truncate">
+                      {g.name}
+                    </span>
+                    {g.aliases && g.aliases.length > 0 && (
+                      <span className="text-[10px] text-slate-400 block truncate" title={g.aliases.join("، ")}>
+                        مطابقات: {g.aliases.slice(0, 3).join("، ")}
+                        {g.aliases.length > 3 ? "..." : ""}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <div className="relative w-24">
+                      <input
+                        type="number"
+                        min="0"
+                        value={g.rate}
+                        onChange={(e) =>
+                          handleRateChange(g.name, Number(e.target.value))
+                        }
+                        className="w-full pl-7 pr-2 py-1.5 text-xs font-bold text-slate-900 bg-white border border-slate-300 rounded-lg text-left focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                      <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[10px] text-slate-400 pointer-events-none">
+                        ج.م
+                      </span>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveGovernorate(g.name)}
+                      className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg transition-colors"
+                      title="حذف المحافظة"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+          </div>
+
+          <div className="pt-4 border-t flex justify-end">
+            <button
+              type="button"
+              onClick={handleSaveShippingRates}
+              disabled={isSavingRates}
+              className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl transition-all shadow-md shadow-blue-500/20 flex items-center gap-2 disabled:opacity-50"
+            >
+              {isSavingRates ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>جاري الحفظ...</span>
+                </>
+              ) : (
+                <>
+                  <Save className="w-4 h-4" />
+                  <span>حفظ أسعار الشحن في قاعدة البيانات</span>
+                </>
+              )}
+            </button>
           </div>
         </div>
       )}

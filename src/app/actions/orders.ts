@@ -1,7 +1,9 @@
 "use server";
 
+import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { calculateCod, calculateNetProfit, derivePaymentStatus } from "@/lib/calculations";
+import { normalizePhoneNumber } from "@/lib/excel-import";
 import { Order, OrderInsert, OrderUpdate, PrintStatus, DeliveryStatus, SettlementStatus, PaymentStatus } from "@/types/database";
 
 export interface CreateOrderInput {
@@ -67,6 +69,7 @@ export async function getOrdersAction(
     let query = supabase
       .from("orders")
       .select("*", { count: "exact" })
+      .is("deleted_at", null)
       .order("created_at", { ascending: false });
 
     if (params.search?.trim()) {
@@ -149,6 +152,7 @@ export async function getOrdersByIdsAction(
     const { data, error } = await supabase
       .from("orders")
       .select("*")
+      .is("deleted_at", null)
       .in("id", orderIds)
       .order("created_at", { ascending: false });
 
@@ -468,6 +472,7 @@ export async function getDashboardMetricsAction(): Promise<ActionResult<Dashboar
     const { data: allOrders, error: ordersError } = await supabase
       .from("orders")
       .select("*")
+      .is("deleted_at", null)
       .order("created_at", { ascending: false });
 
     if (ordersError) {
@@ -646,5 +651,215 @@ export async function batchUpdateDeliveryStatusAction(
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "خطأ غير متوقع";
     return { success: false, error: "تعذر تحديث حالة التوصيل: " + msg };
+  }
+}
+
+export async function deleteOrderAction(
+  orderId: string
+): Promise<ActionResult<{ id: string }>> {
+  try {
+    const supabase = await createClient();
+
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+
+    if (userError || !user) {
+      return { success: false, error: "انتهت جلستك، يرجى تسجيل الدخول مجدداً" };
+    }
+
+    if (!orderId) {
+      return { success: false, error: "معرف الأوردر غير محدد" };
+    }
+
+    const { error } = await (supabase
+      .from("orders") as any)
+      .update({
+        deleted_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", orderId);
+
+    if (error) {
+      return { success: false, error: "فشل حذف الأوردر: " + error.message };
+    }
+
+    revalidatePath("/orders");
+    revalidatePath("/dashboard");
+    revalidatePath("/finance");
+    revalidatePath("/settlements");
+    revalidatePath("/print/queue");
+    revalidatePath("/print/archive");
+
+    return { success: true, data: { id: orderId } };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "خطأ غير متوقع";
+    return { success: false, error: "تعذر حذف الأوردر: " + msg };
+  }
+}
+
+export async function batchDeleteOrdersAction(
+  orderIds: string[]
+): Promise<ActionResult<{ deletedCount: number }>> {
+  try {
+    const supabase = await createClient();
+
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+
+    if (userError || !user) {
+      return { success: false, error: "انتهت جلستك، يرجى تسجيل الدخول مجدداً" };
+    }
+
+    if (!Array.isArray(orderIds) || orderIds.length === 0) {
+      return { success: false, error: "لم يتم تحديد أي أوردرات للحذف" };
+    }
+
+    const { error } = await (supabase
+      .from("orders") as any)
+      .update({
+        deleted_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .in("id", orderIds);
+
+    if (error) {
+      return { success: false, error: "فشل حذف الأوردرات المحددة: " + error.message };
+    }
+
+    revalidatePath("/orders");
+    revalidatePath("/dashboard");
+    revalidatePath("/finance");
+    revalidatePath("/settlements");
+    revalidatePath("/print/queue");
+    revalidatePath("/print/archive");
+
+    return { success: true, data: { deletedCount: orderIds.length } };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "خطأ غير متوقع";
+    return { success: false, error: "تعذر حذف الأوردرات: " + msg };
+  }
+}
+
+export interface DuplicateCheckResult {
+  isDuplicate: boolean;
+  matches: Order[];
+  reason?: string;
+}
+
+export async function findDuplicateOrdersAction(params: {
+  phone_primary: string;
+  customer_name?: string;
+  address?: string;
+  order_total?: number;
+  excludeId?: string;
+}): Promise<ActionResult<DuplicateCheckResult>> {
+  try {
+    const supabase = await createClient();
+    const cleanPhone = normalizePhoneNumber(params.phone_primary);
+    if (!cleanPhone) {
+      return { success: true, data: { isDuplicate: false, matches: [] } };
+    }
+
+    let query = supabase
+      .from("orders")
+      .select("*")
+      .is("deleted_at", null)
+      .or(`phone_primary.eq.${cleanPhone},phone_secondary.eq.${cleanPhone}`)
+      .order("created_at", { ascending: false })
+      .limit(5);
+
+    if (params.excludeId) {
+      query = query.neq("id", params.excludeId);
+    }
+
+    const { data, error } = await query;
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    const orders = (data || []) as Order[];
+    if (orders.length === 0) {
+      return { success: true, data: { isDuplicate: false, matches: [] } };
+    }
+
+    const sameTotal =
+      params.order_total !== undefined &&
+      orders.some((o) => Math.abs(Number(o.order_total) - Number(params.order_total)) < 0.01);
+    const sameName =
+      params.customer_name &&
+      orders.some(
+        (o) =>
+          o.customer_name.trim().toLowerCase() ===
+          params.customer_name?.trim().toLowerCase()
+      );
+    const sameAddress =
+      params.address &&
+      orders.some(
+        (o) =>
+          o.address.trim().toLowerCase().includes(params.address!.trim().toLowerCase()) ||
+          params.address!.trim().toLowerCase().includes(o.address.trim().toLowerCase())
+      );
+
+    let reason = "يوجد أوردر سابق مسجل بنفس رقم الهاتف في النظام";
+    if (sameTotal && sameName) {
+      reason = "يوجد أوردر سابق بنفس رقم الهاتف ونفس اسم العميل ونفس قيمة الأوردر";
+    } else if (sameTotal) {
+      reason = "يوجد أوردر سابق بنفس رقم الهاتف ونفس قيمة الأوردر الإجمالية";
+    } else if (sameName) {
+      reason = "يوجد أوردر سابق بنفس رقم الهاتف ونفس اسم العميل";
+    } else if (sameAddress) {
+      reason = "يوجد أوردر سابق بنفس رقم الهاتف ونفس العنوان تقريباً";
+    }
+
+    return {
+      success: true,
+      data: {
+        isDuplicate: true,
+        matches: orders,
+        reason,
+      },
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "خطأ غير متوقع";
+    return { success: false, error: msg };
+  }
+}
+
+export async function checkExistingPhoneDuplicatesAction(
+  phones: string[]
+): Promise<ActionResult<Record<string, Order[]>>> {
+  try {
+    const supabase = await createClient();
+    const cleanPhones = Array.from(new Set(phones.map(normalizePhoneNumber).filter(Boolean)));
+    if (cleanPhones.length === 0) {
+      return { success: true, data: {} };
+    }
+
+    const { data, error } = await supabase
+      .from("orders")
+      .select("*")
+      .is("deleted_at", null)
+      .in("phone_primary", cleanPhones)
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    const resultMap: Record<string, Order[]> = {};
+    ((data || []) as Order[]).forEach((o) => {
+      const p = normalizePhoneNumber(o.phone_primary);
+      if (!resultMap[p]) resultMap[p] = [];
+      resultMap[p].push(o);
+    });
+
+    return { success: true, data: resultMap };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "خطأ غير متوقع";
+    return { success: false, error: msg };
   }
 }

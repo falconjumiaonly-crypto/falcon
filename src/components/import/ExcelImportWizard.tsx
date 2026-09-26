@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useTransition } from "react";
+import { useState, useRef, useTransition, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import * as XLSX from "xlsx";
@@ -18,8 +18,9 @@ import {
   RefreshCw,
   Info,
 } from "lucide-react";
-import { OrderInsert } from "@/types/database";
-import { formatEgp } from "@/lib/calculations";
+import { OrderInsert, GovernorateRate } from "@/types/database";
+import { formatEgp, calculateCod, calculateNetProfit } from "@/lib/calculations";
+import { DEFAULT_GOVERNORATES } from "@/lib/governorates";
 import {
   detectColumnMappings,
   validateImportRow,
@@ -27,13 +28,20 @@ import {
   FIELD_LABELS,
   ValidatedImportRow,
 } from "@/lib/excel-import";
-import { batchCreateOrdersAction } from "@/app/actions/orders";
+import {
+  batchCreateOrdersAction,
+  checkExistingPhoneDuplicatesAction,
+} from "@/app/actions/orders";
+import { getShippingRatesAction } from "@/app/actions/settings";
 
 type Step = "upload" | "mapping" | "preview" | "complete";
 
 export function ExcelImportWizard() {
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Shipping Rates
+  const [shippingRates, setShippingRates] = useState<GovernorateRate[]>(DEFAULT_GOVERNORATES);
 
   // Wizard Step
   const [currentStep, setCurrentStep] = useState<Step>("upload");
@@ -46,7 +54,17 @@ export function ExcelImportWizard() {
 
   // Validation results
   const [validatedRows, setValidatedRows] = useState<ValidatedImportRow[]>([]);
-  const [previewFilter, setPreviewFilter] = useState<"all" | "valid" | "invalid">("all");
+  const [previewFilter, setPreviewFilter] = useState<"all" | "valid" | "invalid" | "duplicate">("all");
+  const [isValidatingDuplicates, setIsValidatingDuplicates] = useState(false);
+
+  // Load configured shipping rates on mount
+  useEffect(() => {
+    getShippingRatesAction().then((res) => {
+      if (res.success && res.data && res.data.length > 0) {
+        setShippingRates(res.data);
+      }
+    });
+  }, []);
 
   // Import execution
   const [isPending, startTransition] = useTransition();
@@ -131,8 +149,64 @@ export function ExcelImportWizard() {
     }
   };
 
-  // Proceed to Preview
-  const handleProceedToPreview = () => {
+  // Handle Governorates resolution
+  const handleResolveGovernorate = (rowNumber: number, selectedGovName: string) => {
+    setValidatedRows((prev) =>
+      prev.map((r) => {
+        if (r.rowNumber !== rowNumber) return r;
+        const govRate = shippingRates.find((g) => g.name === selectedGovName);
+        if (!govRate) return r;
+
+        const newShipping = govRate.rate;
+        const orderTotal = r.data?.order_total ?? 0;
+        const paidAmount = r.data?.paid_amount ?? 0;
+        const newCod = calculateCod(orderTotal, paidAmount);
+        const newProfit = calculateNetProfit(orderTotal, newShipping);
+
+        const remainingErrors = r.errors.filter(
+          (err) => !err.includes("المحافظة")
+        );
+
+        const updatedData: OrderInsert = {
+          ...(r.data as OrderInsert),
+          governorate: selectedGovName,
+          shipping_cost: newShipping,
+          cod_amount: newCod,
+          net_profit: newProfit,
+        };
+
+        return {
+          ...r,
+          governorateMatched: true,
+          errors: remainingErrors,
+          isValid: remainingErrors.length === 0,
+          data: updatedData,
+        };
+      })
+    );
+  };
+
+  // Duplicate skip toggle
+  const handleToggleSkipDuplicate = (rowNumber: number) => {
+    setValidatedRows((prev) =>
+      prev.map((r) =>
+        r.rowNumber === rowNumber
+          ? { ...r, skipDuplicate: !r.skipDuplicate }
+          : r
+      )
+    );
+  };
+
+  const handleBulkSetDuplicateSkip = (skip: boolean) => {
+    setValidatedRows((prev) =>
+      prev.map((r) =>
+        r.isDuplicate ? { ...r, skipDuplicate: skip } : r
+      )
+    );
+  };
+
+  // Proceed to Preview with Duplicate Checking
+  const handleProceedToPreview = async () => {
     const required = [
       "customer_name",
       "phone_primary",
@@ -151,23 +225,90 @@ export function ExcelImportWizard() {
       return;
     }
 
-    // Validate all rows
-    const validated = rawRows.map((row, idx) =>
-      validateImportRow(row, columnMapping, idx + 1)
-    );
+    setIsValidatingDuplicates(true);
+    setError(null);
 
-    setValidatedRows(validated);
-    setCurrentStep("preview");
+    try {
+      // 1. Initial row validation with loaded shippingRates
+      const validated = rawRows.map((row, idx) =>
+        validateImportRow(row, columnMapping, idx + 1, shippingRates)
+      );
+
+      // 2. Intra-sheet duplicate detection
+      const phoneToIndices = new Map<string, number[]>();
+      const phoneList: string[] = [];
+
+      validated.forEach((r, idx) => {
+        const p = r.data?.phone_primary || "";
+        if (p) {
+          phoneList.push(p);
+          const list = phoneToIndices.get(p) || [];
+          list.push(idx);
+          phoneToIndices.set(p, list);
+        }
+      });
+
+      phoneToIndices.forEach((indices, phone) => {
+        if (indices.length > 1) {
+          indices.forEach((idx) => {
+            validated[idx].isDuplicate = true;
+            validated[idx].duplicateReason = `مكرر داخل نفس الملف (نفس الهاتف ${phone} في ${indices.length} صفوف)`;
+            validated[idx].skipDuplicate = false;
+          });
+        }
+      });
+
+      // 3. Database existing duplicates check
+      if (phoneList.length > 0) {
+        const dupRes = await checkExistingPhoneDuplicatesAction(phoneList);
+        if (dupRes.success && dupRes.data) {
+          const dbMatches = dupRes.data;
+          validated.forEach((r) => {
+            const p = r.data?.phone_primary || "";
+            if (p && dbMatches[p] && dbMatches[p].length > 0) {
+              const match = dbMatches[p][0];
+              r.isDuplicate = true;
+              const sameTotal =
+                Math.abs(Number(match.order_total) - Number(r.data?.order_total || 0)) < 0.01;
+              const sameName =
+                match.customer_name.trim().toLowerCase() ===
+                (r.data?.customer_name || "").trim().toLowerCase();
+
+              let reason = `يوجد أوردر سابق في النظام بنفس رقم الهاتف`;
+              if (sameTotal && sameName) {
+                reason = `يوجد أوردر مطابق في النظام بنفس الهاتف واسم العميل والمبلغ`;
+              } else if (sameTotal) {
+                reason = `يوجد أوردر سابق في النظام بنفس الهاتف ونفس المبلغ`;
+              } else if (sameName) {
+                reason = `يوجد أوردر سابق في النظام بنفس الهاتف ونفس الاسم`;
+              }
+
+              r.duplicateReason = reason;
+              r.matchedOrderSummary = `أوردر سابق #${match.id.slice(0, 8).toUpperCase()} | ${match.customer_name} | ${formatEgp(match.order_total)} | الحالة: ${match.delivery_status}`;
+              r.skipDuplicate = false;
+            }
+          });
+        }
+      }
+
+      setValidatedRows(validated);
+      setCurrentStep("preview");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "خطأ غير متوقع";
+      setError("حدث خطأ أثناء فحص البيانات: " + msg);
+    } finally {
+      setIsValidatingDuplicates(false);
+    }
   };
 
   // Execute Batch Import
   const handleExecuteImport = () => {
     const validOrders = validatedRows
-      .filter((r) => r.isValid && r.data !== null)
+      .filter((r) => r.isValid && r.data !== null && !r.skipDuplicate)
       .map((r) => r.data as OrderInsert);
 
     if (validOrders.length === 0) {
-      setError("لا توجد أي صفوف صالحة للاستيراد");
+      setError("لا توجد أي صفوف صالحة ومحددة للاستيراد (قد تكون كافة الصفوف بها أخطاء أو تم تحديد تجاهلها)");
       return;
     }
 
@@ -185,13 +326,18 @@ export function ExcelImportWizard() {
 
   // Filtered rows in Preview
   const displayedRows = validatedRows.filter((r) => {
-    if (previewFilter === "valid") return r.isValid;
+    if (previewFilter === "valid") return r.isValid && !r.skipDuplicate;
     if (previewFilter === "invalid") return !r.isValid;
+    if (previewFilter === "duplicate") return r.isDuplicate;
     return true;
   });
 
   const validCount = validatedRows.filter((r) => r.isValid).length;
   const invalidCount = validatedRows.length - validCount;
+  const duplicateCount = validatedRows.filter((r) => r.isDuplicate).length;
+  const toImportCount = validatedRows.filter(
+    (r) => r.isValid && r.data !== null && !r.skipDuplicate
+  ).length;
 
   return (
     <div className="space-y-6">
@@ -424,10 +570,20 @@ export function ExcelImportWizard() {
 
             <button
               onClick={handleProceedToPreview}
-              className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl transition-all shadow-md shadow-blue-500/20 flex items-center gap-2"
+              disabled={isValidatingDuplicates}
+              className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl transition-all shadow-md shadow-blue-500/20 flex items-center gap-2 disabled:opacity-50"
             >
-              <span>متابعة لتدقيق ومعاينة البيانات ({rawRows.length} صف)</span>
-              <ArrowLeft className="w-4 h-4" />
+              {isValidatingDuplicates ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>جاري فحص وتدقيق البيانات والمكررات...</span>
+                </>
+              ) : (
+                <>
+                  <span>متابعة لتدقيق ومعاينة البيانات ({rawRows.length} صف)</span>
+                  <ArrowLeft className="w-4 h-4" />
+                </>
+              )}
             </button>
           </div>
         </div>
@@ -444,12 +600,12 @@ export function ExcelImportWizard() {
                 مراجعة وتدقيق البيانات قبل الإدراج
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                فحص الصلاحية التلقائي لحقول الأسعار وأرقام الهواتف والعناوين
+                تحديد أسعار الشحن حسب المحافظات، واكتشاف الأوردرات المكررة قبل الحفظ
               </p>
             </div>
 
             {/* Filter Tabs */}
-            <div className="flex items-center bg-slate-100 p-1 rounded-xl text-xs font-bold">
+            <div className="flex flex-wrap items-center bg-slate-100 p-1 rounded-xl text-xs font-bold gap-1">
               <button
                 onClick={() => setPreviewFilter("all")}
                 className={`px-3 py-1.5 rounded-lg transition-all ${
@@ -470,7 +626,7 @@ export function ExcelImportWizard() {
                 }`}
               >
                 <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>صالح للاستيراد ({validCount})</span>
+                <span>محدد للاستيراد ({toImportCount})</span>
               </button>
 
               <button
@@ -484,18 +640,61 @@ export function ExcelImportWizard() {
                 <XCircle className="w-3.5 h-3.5" />
                 <span>به أخطاء ({invalidCount})</span>
               </button>
+
+              {duplicateCount > 0 && (
+                <button
+                  onClick={() => setPreviewFilter("duplicate")}
+                  className={`px-3 py-1.5 rounded-lg transition-all flex items-center gap-1 ${
+                    previewFilter === "duplicate"
+                      ? "bg-amber-500 text-white shadow-sm"
+                      : "text-amber-700 hover:text-amber-900"
+                  }`}
+                >
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  <span>مكرر محتمل ({duplicateCount})</span>
+                </button>
+              )}
             </div>
           </div>
 
           {/* Validation Notice */}
           {invalidCount > 0 && (
-            <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-xl text-amber-900 text-xs flex items-center justify-between gap-3">
+            <div className="p-3.5 bg-rose-50 border border-rose-300 rounded-xl text-rose-900 text-xs flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <XCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>
+                  يوجد <strong>{invalidCount}</strong> صف يحتوي على أخطاء (مثل محافظة غير محددة أو هاتف خاطئ).
+                  يرجى تحديد المحافظة يدويًا من الجدول أدناه لتصحيحه، أو سيتم استيراد الصفوف الصالحة فقط.
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* Duplicate Banner with Bulk Actions */}
+          {duplicateCount > 0 && (
+            <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-xl text-amber-900 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
                 <span>
-                  يوجد <strong>{invalidCount}</strong> صف يحتوي على أخطاء ولن يتم إدراجه. يمكنك
-                  استيراد الـ <strong>{validCount}</strong> صف الصالحة فوراً.
+                  تم اكتشاف <strong>{duplicateCount}</strong> أوردر يحتمل أن يكون مكرراً.
+                  يمكنك استيرادها على أي حال أو تجاهلها دون إيقاف باقي الملف.
                 </span>
+              </div>
+              <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
+                <button
+                  type="button"
+                  onClick={() => handleBulkSetDuplicateSkip(false)}
+                  className="px-2.5 py-1 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 font-bold rounded-lg text-[11px] transition-colors shadow-sm"
+                >
+                  استيراد جميع المكررات
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleBulkSetDuplicateSkip(true)}
+                  className="px-2.5 py-1 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 font-bold rounded-lg text-[11px] transition-colors"
+                >
+                  تجاهل جميع المكررات
+                </button>
               </div>
             </div>
           )}
@@ -505,15 +704,16 @@ export function ExcelImportWizard() {
             <table className="w-full text-right text-xs">
               <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold">
                 <tr>
-                  <th className="p-3 w-12 text-center">#</th>
+                  <th className="p-3 w-10 text-center">#</th>
                   <th className="p-3">حالة التدقيق</th>
                   <th className="p-3">اسم العميل</th>
                   <th className="p-3">الهاتف</th>
-                  <th className="p-3">المحافظة والعنوان</th>
+                  <th className="p-3">المحافظة والشحن</th>
+                  <th className="p-3">العنوان</th>
                   <th className="p-3">سعر الأوردر</th>
-                  <th className="p-3">المدفوع</th>
                   <th className="p-3">المطلوب (COD)</th>
-                  <th className="p-3">ملاحظات</th>
+                  <th className="p-3">صافي الربح</th>
+                  <th className="p-3 text-center">قرار الاستيراد</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -521,7 +721,7 @@ export function ExcelImportWizard() {
                   <tr
                     key={row.rowNumber}
                     className={`hover:bg-slate-50/80 transition-colors ${
-                      !row.isValid ? "bg-rose-50/30" : ""
+                      !row.isValid ? "bg-rose-50/30" : row.isDuplicate ? "bg-amber-50/20" : ""
                     }`}
                   >
                     <td className="p-3 text-center text-slate-400 font-mono">
@@ -530,10 +730,17 @@ export function ExcelImportWizard() {
 
                     <td className="p-3">
                       {row.isValid ? (
-                        <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
-                          <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                          صالح
-                        </span>
+                        <div className="space-y-1">
+                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
+                            <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                            صالح
+                          </span>
+                          {row.isDuplicate && (
+                            <div className="text-[10px] text-amber-700 font-semibold leading-tight">
+                              ⚠️ {row.duplicateReason}
+                            </div>
+                          )}
+                        </div>
                       ) : (
                         <div className="space-y-0.5">
                           <span className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded">
@@ -555,25 +762,45 @@ export function ExcelImportWizard() {
                       {row.data?.phone_primary || String(row.raw[columnMapping.phone_primary] || "-")}
                     </td>
 
-                    <td className="p-3 max-w-xs">
-                      <span className="font-semibold text-slate-800">
-                        {row.data?.governorate || String(row.raw[columnMapping.governorate] || "-")}
-                      </span>
-                      <span className="text-slate-500 block truncate">
-                        {row.data?.address || String(row.raw[columnMapping.address] || "-")}
-                      </span>
+                    <td className="p-3">
+                      {row.governorateMatched ? (
+                        <div>
+                          <span className="px-2 py-0.5 bg-slate-100 text-slate-800 rounded font-bold inline-block">
+                            {row.data?.governorate}
+                          </span>
+                          <span className="text-[11px] text-blue-600 font-semibold block mt-0.5">
+                            شحن: {formatEgp(row.data?.shipping_cost ?? 0)}
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="space-y-1 min-w-[150px]">
+                          <div className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-1.5 py-0.5 rounded">
+                            غير معروفة ({row.governorateRaw || "فارغة"})
+                          </div>
+                          <select
+                            defaultValue=""
+                            onChange={(e) => handleResolveGovernorate(row.rowNumber, e.target.value)}
+                            className="w-full text-xs p-1 bg-white border border-amber-400 rounded-lg text-slate-800 font-bold focus:ring-2 focus:ring-blue-500 shadow-sm"
+                          >
+                            <option value="" disabled>-- حدد المحافظة --</option>
+                            {shippingRates.map((g) => (
+                              <option key={g.name} value={g.name}>
+                                {g.name} ({g.rate} ج.م)
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                    </td>
+
+                    <td className="p-3 max-w-xs truncate text-slate-600" title={row.data?.address || String(row.raw[columnMapping.address] || "-")}>
+                      {row.data?.address || String(row.raw[columnMapping.address] || "-")}
                     </td>
 
                     <td className="p-3 font-bold text-slate-900">
                       {row.data?.order_total !== undefined
                         ? formatEgp(row.data.order_total)
                         : String(row.raw[columnMapping.order_total] || "-")}
-                    </td>
-
-                    <td className="p-3 text-slate-600">
-                      {row.data?.paid_amount !== undefined
-                        ? formatEgp(row.data.paid_amount)
-                        : String(row.raw[columnMapping.paid_amount] || "0")}
                     </td>
 
                     <td className="p-3 font-bold text-slate-900">
@@ -588,8 +815,30 @@ export function ExcelImportWizard() {
                       )}
                     </td>
 
-                    <td className="p-3 text-slate-500 max-w-[150px] truncate">
-                      {row.data?.important_notes || "-"}
+                    <td className="p-3 font-bold text-emerald-700">
+                      {row.data?.net_profit !== undefined
+                        ? formatEgp(row.data.net_profit)
+                        : "-"}
+                    </td>
+
+                    <td className="p-3 text-center">
+                      {!row.isValid ? (
+                        <span className="text-[10px] text-rose-600 font-bold">يحتاج تصحيح</span>
+                      ) : row.isDuplicate ? (
+                        <button
+                          type="button"
+                          onClick={() => handleToggleSkipDuplicate(row.rowNumber)}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all border ${
+                            row.skipDuplicate
+                              ? "bg-slate-100 text-slate-500 border-slate-300"
+                              : "bg-emerald-50 text-emerald-700 border-emerald-300 shadow-sm"
+                          }`}
+                        >
+                          {row.skipDuplicate ? "متجاهل (تخطي)" : "استيراد على أي حال ✓"}
+                        </button>
+                      ) : (
+                        <span className="text-[11px] font-bold text-emerald-700">جاهز ✓</span>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -608,7 +857,7 @@ export function ExcelImportWizard() {
 
             <button
               onClick={handleExecuteImport}
-              disabled={isPending || validCount === 0}
+              disabled={isPending || toImportCount === 0}
               className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl transition-all shadow-md shadow-emerald-600/20 flex items-center gap-2 disabled:opacity-50"
             >
               {isPending ? (
@@ -619,7 +868,7 @@ export function ExcelImportWizard() {
               ) : (
                 <>
                   <CheckCircle className="w-4 h-4" />
-                  <span>تأكيد استيراد ({validCount}) أوردر إلى قائمة الطباعة</span>
+                  <span>تأكيد استيراد ({toImportCount}) أوردر إلى قائمة الطباعة</span>
                 </>
               )}
             </button>

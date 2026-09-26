@@ -20,10 +20,17 @@ import {
   Eye,
   PlusCircle,
   CheckCircle2,
+  Trash2,
 } from "lucide-react";
 import { Order, PrintStatus, DeliveryStatus, SettlementStatus, PaymentStatus } from "@/types/database";
 import { formatEgp, getPaymentStatusBadge } from "@/lib/calculations";
-import { getOrdersAction, updateOrderAction, batchUpdatePrintStatusAction } from "@/app/actions/orders";
+import {
+  getOrdersAction,
+  updateOrderAction,
+  batchUpdatePrintStatusAction,
+  deleteOrderAction,
+  batchDeleteOrdersAction,
+} from "@/app/actions/orders";
 
 interface OrdersTableProps {
   initialPrintStatus?: string;
@@ -64,6 +71,13 @@ export function OrdersTable({
   const [editFormData, setEditFormData] = useState<Partial<Order>>({});
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
+
+  // Delete State
+  const [deletingOrder, setDeletingOrder] = useState<Order | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [isBulkDeleting, setIsBulkDeleting] = useState(false);
+  const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
 
   // Fetch orders from server action
   const loadOrders = useCallback(async () => {
@@ -214,6 +228,48 @@ export function OrdersTable({
       await batchUpdatePrintStatusAction(selectedIds, "pending");
       router.push(`/print/queue?selected=${selectedIds.join(",")}`);
     });
+  };
+
+  // Delete Order Single
+  const handleDeleteOrder = async () => {
+    if (!deletingOrder) return;
+    setIsDeleting(true);
+    setDeleteError(null);
+    try {
+      const res = await deleteOrderAction(deletingOrder.id);
+      if (res.success) {
+        setOrders((prev) => prev.filter((o) => o.id !== deletingOrder.id));
+        setSelectedIds((prev) => prev.filter((id) => id !== deletingOrder.id));
+        setTotalOrders((prev) => Math.max(0, prev - 1));
+        setDeletingOrder(null);
+      } else {
+        setDeleteError(res.error || "فشل حذف الأوردر");
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "حدث خطأ غير متوقع";
+      setDeleteError(msg);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  // Bulk Delete Orders
+  const handleBulkDelete = async () => {
+    if (selectedIds.length === 0) return;
+    setIsBulkDeleting(true);
+    try {
+      const res = await batchDeleteOrdersAction(selectedIds);
+      if (res.success) {
+        setOrders((prev) => prev.filter((o) => !selectedIds.includes(o.id)));
+        setTotalOrders((prev) => Math.max(0, prev - selectedIds.length));
+        setSelectedIds([]);
+        setShowBulkDeleteConfirm(false);
+      }
+    } catch {
+      //
+    } finally {
+      setIsBulkDeleting(false);
+    }
   };
 
   return (
@@ -451,6 +507,15 @@ export function OrdersTable({
             </button>
 
             <button
+              onClick={() => setShowBulkDeleteConfirm(true)}
+              disabled={isBulkDeleting}
+              className="h-9 px-3.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>حذف المحدد ({selectedIds.length})</span>
+            </button>
+
+            <button
               onClick={() => setSelectedIds([])}
               className="p-1.5 text-blue-300 hover:text-white rounded-lg hover:bg-blue-800 transition-colors"
               title="إلغاء التحديد"
@@ -619,6 +684,17 @@ export function OrdersTable({
                           >
                             <Printer className="w-3.5 h-3.5" />
                           </Link>
+
+                          <button
+                            onClick={() => {
+                              setDeletingOrder(order);
+                              setDeleteError(null);
+                            }}
+                            className="p-1.5 rounded-lg text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+                            title="حذف الأوردر"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -840,6 +916,134 @@ export function OrdersTable({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation Dialog */}
+      {deletingOrder && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-5">
+            <div className="flex items-center gap-3 text-rose-600">
+              <div className="w-12 h-12 rounded-2xl bg-rose-100 flex items-center justify-center shrink-0">
+                <Trash2 className="w-6 h-6 text-rose-600" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">تأكيد حذف الأوردر</h3>
+                <p className="text-xs text-slate-500">حذف الأوردر من النظام وسجل العمليات النشطة</p>
+              </div>
+            </div>
+
+            <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200 text-xs space-y-2">
+              <div className="flex justify-between">
+                <span className="text-slate-500">اسم العميل:</span>
+                <span className="font-bold text-slate-900">{deletingOrder.customer_name}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">رقم الهاتف:</span>
+                <span className="font-mono font-bold text-slate-900" dir="ltr">{deletingOrder.phone_primary}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">المحافظة:</span>
+                <span className="font-bold text-slate-800">{deletingOrder.governorate}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">المبلغ المطلوب (COD):</span>
+                <span className="font-bold text-blue-600">{formatEgp(deletingOrder.cod_amount)}</span>
+              </div>
+            </div>
+
+            <p className="text-sm font-semibold text-slate-800 text-center">
+              هل أنت متأكد من حذف هذا الأوردر؟
+            </p>
+
+            {deleteError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 font-medium">
+                {deleteError}
+              </div>
+            )}
+
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setDeletingOrder(null);
+                  setDeleteError(null);
+                }}
+                disabled={isDeleting}
+                className="flex-1 h-11 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition-colors"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteOrder}
+                disabled={isDeleting}
+                className="flex-1 h-11 rounded-xl bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white font-bold text-xs flex items-center justify-center gap-2 transition-colors shadow-lg shadow-rose-600/20"
+              >
+                {isDeleting ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>جاري الحذف...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-4 h-4" />
+                    <span>تأكيد الحذف</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Delete Confirmation Dialog */}
+      {showBulkDeleteConfirm && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-5">
+            <div className="flex items-center gap-3 text-rose-600">
+              <div className="w-12 h-12 rounded-2xl bg-rose-100 flex items-center justify-center shrink-0">
+                <Trash2 className="w-6 h-6 text-rose-600" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">تأكيد حذف مجموعة طلبات</h3>
+                <p className="text-xs text-slate-500">حذف {selectedIds.length} أوردر محدد دفعة واحدة</p>
+              </div>
+            </div>
+
+            <p className="text-sm font-semibold text-slate-800 text-center">
+              هل أنت متأكد من حذف {selectedIds.length} أوردر محدد؟
+            </p>
+
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setShowBulkDeleteConfirm(false)}
+                disabled={isBulkDeleting}
+                className="flex-1 h-11 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition-colors"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                onClick={handleBulkDelete}
+                disabled={isBulkDeleting}
+                className="flex-1 h-11 rounded-xl bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white font-bold text-xs flex items-center justify-center gap-2 transition-colors shadow-lg shadow-rose-600/20"
+              >
+                {isBulkDeleting ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>جاري الحذف...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-4 h-4" />
+                    <span>تأكيد الحذف</span>
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}

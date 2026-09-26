@@ -6,12 +6,15 @@ import {
   FalconBrandingSettings,
   FalconCompanyInfoSettings,
   FalconWebhookSettings,
+  GovernorateRate,
 } from "@/types/database";
+import { DEFAULT_GOVERNORATES } from "@/lib/governorates";
 
 export interface AppSettingsBundle {
   branding: FalconBrandingSettings;
   companyInfo: FalconCompanyInfoSettings;
   webhook: FalconWebhookSettings;
+  shippingRates: GovernorateRate[];
 }
 
 const DEFAULT_BRANDING: FalconBrandingSettings = {
@@ -46,7 +49,7 @@ export async function getAppSettingsAction(): Promise<{
     const { data, error } = await supabase
       .from("app_settings")
       .select("key, value")
-      .in("key", ["branding", "company_info", "webhook_config"]);
+      .in("key", ["branding", "company_info", "webhook_config", "shipping_rates"]);
 
     if (error) {
       return { success: false, error: error.message };
@@ -60,6 +63,10 @@ export async function getAppSettingsAction(): Promise<{
     const branding = (settingsMap["branding"] as FalconBrandingSettings) || DEFAULT_BRANDING;
     const companyInfo = (settingsMap["company_info"] as FalconCompanyInfoSettings) || DEFAULT_COMPANY_INFO;
     const webhook = (settingsMap["webhook_config"] as FalconWebhookSettings) || DEFAULT_WEBHOOK;
+    const shippingRates =
+      Array.isArray(settingsMap["shipping_rates"]) && (settingsMap["shipping_rates"] as GovernorateRate[]).length > 0
+        ? (settingsMap["shipping_rates"] as GovernorateRate[])
+        : DEFAULT_GOVERNORATES;
 
     return {
       success: true,
@@ -67,10 +74,68 @@ export async function getAppSettingsAction(): Promise<{
         branding: { ...DEFAULT_BRANDING, ...branding },
         companyInfo: { ...DEFAULT_COMPANY_INFO, ...companyInfo },
         webhook: { ...DEFAULT_WEBHOOK, ...webhook },
+        shippingRates,
       },
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : "تعذر استرجاع الإعدادات";
+    return { success: false, error: msg };
+  }
+}
+
+export async function getShippingRatesAction(): Promise<{
+  success: boolean;
+  data?: GovernorateRate[];
+  error?: string;
+}> {
+  try {
+    const supabase = await createClient();
+    const { data, error } = await supabase
+      .from("app_settings")
+      .select("value")
+      .eq("key", "shipping_rates")
+      .maybeSingle();
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    const row = data as { value?: unknown } | null;
+    const rates = Array.isArray(row?.value) && (row.value as GovernorateRate[]).length > 0
+      ? (row.value as GovernorateRate[])
+      : DEFAULT_GOVERNORATES;
+
+    return { success: true, data: rates };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "تعذر استرجاع أسعار الشحن";
+    return { success: false, error: msg };
+  }
+}
+
+export async function saveShippingRatesAction(
+  rates: GovernorateRate[]
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const supabase = await createClient();
+    const { error } = await (supabase.from("app_settings") as any).upsert(
+      {
+        key: "shipping_rates",
+        value: rates as any,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "key" }
+    );
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    revalidatePath("/settings");
+    revalidatePath("/orders/create");
+    revalidatePath("/import");
+    return { success: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "فشل حفظ أسعار الشحن";
     return { success: false, error: msg };
   }
 }

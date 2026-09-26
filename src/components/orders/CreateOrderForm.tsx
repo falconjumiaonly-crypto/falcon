@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useState, useEffect, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
   User,
@@ -17,9 +17,11 @@ import {
   Clock,
 } from "lucide-react";
 import { calculateCod, calculateNetProfit, formatEgp } from "@/lib/calculations";
-import { createOrderAction } from "@/app/actions/orders";
+import { createOrderAction, findDuplicateOrdersAction } from "@/app/actions/orders";
+import { getShippingRatesAction } from "@/app/actions/settings";
+import { DEFAULT_GOVERNORATES, matchGovernorate } from "@/lib/governorates";
 import { useOrderDraft, OrderFormData } from "@/hooks/useOrderDraft";
-import { Order } from "@/types/database";
+import { Order, GovernorateRate } from "@/types/database";
 
 const commonGovernorates = [
   "القاهرة",
@@ -60,9 +62,39 @@ export function CreateOrderForm() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [createdOrder, setCreatedOrder] = useState<Order | null>(null);
 
+  // Governorate shipping rates state
+  const [shippingRates, setShippingRates] = useState<GovernorateRate[]>(DEFAULT_GOVERNORATES);
+  const [autoMatchedGov, setAutoMatchedGov] = useState<string | null>(null);
+
+  // Duplicate Order Warning State
+  const [checkingDuplicate, setCheckingDuplicate] = useState(false);
+  const [duplicateWarning, setDuplicateWarning] = useState<{
+    reason: string;
+    matchedOrder: Order;
+  } | null>(null);
+
+  useEffect(() => {
+    getShippingRatesAction().then((res) => {
+      if (res.success && res.data && res.data.length > 0) {
+        setShippingRates(res.data);
+      }
+    });
+  }, []);
+
   const handleFieldChange = (field: keyof OrderFormData, value: string) => {
     updateField(field, value);
     if (errorMessage) setErrorMessage(null);
+  };
+
+  const handleGovernorateChange = (val: string) => {
+    handleFieldChange("governorate", val);
+    const match = matchGovernorate(val, shippingRates);
+    if (match.matched && match.rate !== undefined) {
+      handleFieldChange("shipping_cost", String(match.rate));
+      setAutoMatchedGov(match.standardName || val);
+    } else {
+      setAutoMatchedGov(null);
+    }
   };
 
   const handleDiscardDraft = () => {
@@ -82,7 +114,35 @@ export function CreateOrderForm() {
   const isFullyPaid = totalNum > 0 && paidNum >= totalNum;
   const isPaidExceedsTotal = paidNum > totalNum;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const executeCreateOrder = () => {
+    startTransition(async () => {
+      const res = await createOrderAction({
+        customer_name: formData.customer_name,
+        phone_primary: formData.phone_primary,
+        phone_secondary: formData.phone_secondary,
+        governorate: formData.governorate,
+        address: formData.address,
+        landmark: formData.landmark,
+        order_total: totalNum,
+        paid_amount: paidNum,
+        shipping_cost: shippingNum,
+        important_notes: formData.important_notes,
+        order_date: formData.order_date,
+      });
+
+      if (!res.success) {
+        setErrorMessage(res.error || "فشل في حفظ الأوردر");
+        return;
+      }
+
+      // Success: Clear draft ONLY after verified database persistence
+      clearDraft();
+      setCreatedOrder(res.data!);
+      setDuplicateWarning(null);
+    });
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
 
@@ -120,30 +180,31 @@ export function CreateOrderForm() {
       return;
     }
 
-    startTransition(async () => {
-      const res = await createOrderAction({
-        customer_name: formData.customer_name,
+    // Check for potential duplicates
+    setCheckingDuplicate(true);
+    try {
+      const dupRes = await findDuplicateOrdersAction({
         phone_primary: formData.phone_primary,
-        phone_secondary: formData.phone_secondary,
-        governorate: formData.governorate,
+        customer_name: formData.customer_name,
         address: formData.address,
-        landmark: formData.landmark,
         order_total: totalNum,
-        paid_amount: paidNum,
-        shipping_cost: shippingNum,
-        important_notes: formData.important_notes,
-        order_date: formData.order_date,
       });
 
-      if (!res.success) {
-        setErrorMessage(res.error || "فشل في حفظ الأوردر");
+      if (dupRes.success && dupRes.data?.isDuplicate && dupRes.data.matches.length > 0) {
+        setDuplicateWarning({
+          reason: dupRes.data.reason || "يوجد أوردر مشابه مسجل بالفعل وقد يكون هذا الأوردر مكررًا.",
+          matchedOrder: dupRes.data.matches[0],
+        });
+        setCheckingDuplicate(false);
         return;
       }
+    } catch {
+      // If check fails, do not block creation
+    } finally {
+      setCheckingDuplicate(false);
+    }
 
-      // Success: Clear draft ONLY after verified database persistence
-      clearDraft();
-      setCreatedOrder(res.data!);
-    });
+    executeCreateOrder();
   };
 
   const handleResetForNextOrder = () => {
@@ -336,22 +397,31 @@ export function CreateOrderForm() {
 
             {/* Governorate */}
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                المحافظة <span className="text-rose-500">*</span>
-              </label>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-xs font-semibold text-slate-700">
+                  المحافظة <span className="text-rose-500">*</span>
+                </label>
+                {autoMatchedGov && (
+                  <span className="text-[10px] text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                    تم التعرف: {autoMatchedGov}
+                  </span>
+                )}
+              </div>
               <input
                 type="text"
                 required
                 id="governorate"
                 list="governorates-list"
                 value={formData.governorate}
-                onChange={(e) => handleFieldChange("governorate", e.target.value)}
+                onChange={(e) => handleGovernorateChange(e.target.value)}
                 placeholder="اكتب اسم المحافظة (مثال: الجيزة)"
                 className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600 focus:bg-white transition-colors"
               />
               <datalist id="governorates-list">
-                {commonGovernorates.map((gov) => (
-                  <option key={gov} value={gov} />
+                {shippingRates.map((gov) => (
+                  <option key={gov.name} value={gov.name}>
+                    {gov.name} ({gov.rate} ج.م)
+                  </option>
                 ))}
               </datalist>
             </div>
@@ -597,10 +667,15 @@ export function CreateOrderForm() {
 
           <button
             type="submit"
-            disabled={isPending || isPaidExceedsTotal}
+            disabled={isPending || checkingDuplicate || isPaidExceedsTotal}
             className="h-12 px-8 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 disabled:opacity-50 text-white font-bold text-base rounded-xl shadow-md shadow-blue-600/30 flex items-center gap-2 transition-colors"
           >
-            {isPending ? (
+            {checkingDuplicate ? (
+              <>
+                <Loader2 className="w-5 h-5 animate-spin" />
+                <span>جاري فحص التكرار...</span>
+              </>
+            ) : isPending ? (
               <>
                 <Loader2 className="w-5 h-5 animate-spin" />
                 <span>جاري حفظ الأوردر...</span>
@@ -613,6 +688,93 @@ export function CreateOrderForm() {
           </button>
         </div>
       </form>
+
+      {/* Duplicate Order Warning Modal */}
+      {duplicateWarning && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-amber-200 space-y-5 text-right">
+            <div className="flex items-center gap-3 text-amber-600">
+              <div className="w-12 h-12 rounded-2xl bg-amber-100 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-6 h-6 text-amber-600" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">تنبيه: أوردر مشابه مسجل بالفعل</h3>
+                <p className="text-xs text-amber-700 font-semibold">{duplicateWarning.reason}</p>
+              </div>
+            </div>
+
+            <div className="bg-amber-50/60 rounded-2xl p-4 border border-amber-200/80 space-y-2 text-xs">
+              <div className="font-bold text-slate-700 mb-2 border-b border-amber-200/60 pb-1.5 flex justify-between">
+                <span>بيانات الأوردر السابق المطابق:</span>
+                <span className="font-mono text-slate-500">#{duplicateWarning.matchedOrder.id.slice(0, 8)}</span>
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-slate-600">
+                <div>
+                  <span className="text-slate-400 block">اسم العميل:</span>
+                  <span className="font-bold text-slate-900">{duplicateWarning.matchedOrder.customer_name}</span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block">رقم الهاتف:</span>
+                  <span className="font-mono font-bold text-slate-900" dir="ltr">{duplicateWarning.matchedOrder.phone_primary}</span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block">المحافظة:</span>
+                  <span className="font-bold text-slate-800">{duplicateWarning.matchedOrder.governorate}</span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block">إجمالي الأوردر:</span>
+                  <span className="font-bold text-blue-600">{formatEgp(duplicateWarning.matchedOrder.order_total)}</span>
+                </div>
+                <div className="col-span-2">
+                  <span className="text-slate-400 block">العنوان:</span>
+                  <span className="text-slate-700">{duplicateWarning.matchedOrder.address}</span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block">تاريخ التسجيل:</span>
+                  <span className="font-semibold text-slate-700">{duplicateWarning.matchedOrder.order_date}</span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block">حالة التوصيل:</span>
+                  <span className="font-bold text-slate-700">
+                    {duplicateWarning.matchedOrder.delivery_status === "delivered" ? "تم التوصيل" :
+                     duplicateWarning.matchedOrder.delivery_status === "handed_to_carrier" ? "مع المندوب" :
+                     duplicateWarning.matchedOrder.delivery_status === "returned" ? "مرتجع" : "جديد"}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              يوجد أوردر مشابه مسجل بالفعل وقد يكون هذا الأوردر مكررًا. يمكنك اتخاذ القرار بإلغاء الإضافة أو إكمال الحفظ على أي حال.
+            </p>
+
+            <div className="flex flex-col sm:flex-row items-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setDuplicateWarning(null)}
+                className="w-full sm:flex-1 h-11 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition-colors"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                onClick={executeCreateOrder}
+                disabled={isPending}
+                className="w-full sm:flex-1 h-11 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs flex items-center justify-center gap-2 transition-colors shadow-lg shadow-amber-600/20"
+              >
+                {isPending ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>جاري الحفظ...</span>
+                  </>
+                ) : (
+                  <span>إكمال / إضافة الأوردر على أي حال</span>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

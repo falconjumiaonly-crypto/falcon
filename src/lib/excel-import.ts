@@ -1,6 +1,7 @@
 import * as XLSX from "xlsx";
-import type { OrderInsert } from "../types/database";
+import type { OrderInsert, GovernorateRate } from "../types/database";
 import { calculateCod, calculateNetProfit, derivePaymentStatus } from "./calculations";
+import { matchGovernorate, DEFAULT_GOVERNORATES } from "./governorates";
 
 export const COLUMN_ALIASES: Record<string, string[]> = {
   customer_name: [
@@ -182,6 +183,12 @@ export interface ValidatedImportRow {
   isValid: boolean;
   errors: string[];
   data: OrderInsert | null;
+  governorateMatched: boolean;
+  governorateRaw: string;
+  isDuplicate?: boolean;
+  duplicateReason?: string;
+  matchedOrderSummary?: string;
+  skipDuplicate?: boolean;
 }
 
 /**
@@ -190,7 +197,8 @@ export interface ValidatedImportRow {
 export function validateImportRow(
   rawRow: Record<string, unknown>,
   mapping: Record<string, string>,
-  rowNumber: number
+  rowNumber: number,
+  shippingRates: GovernorateRate[] = DEFAULT_GOVERNORATES
 ): ValidatedImportRow {
   const errors: string[] = [];
 
@@ -205,28 +213,48 @@ export function validateImportRow(
   const phonePrimary = normalizePhoneNumber(rawPhonePrimary);
   const rawPhoneSecondary = getValue("phone_secondary");
   const phoneSecondary = rawPhoneSecondary ? normalizePhoneNumber(rawPhoneSecondary) : null;
-  const governorate = String(getValue("governorate") ?? "").trim();
+  const rawGovernorate = String(getValue("governorate") ?? "").trim();
   const address = String(getValue("address") ?? "").trim();
   const landmark = getValue("landmark") ? String(getValue("landmark")).trim() : null;
   const importantNotes = getValue("important_notes")
     ? String(getValue("important_notes")).trim()
     : null;
 
+  // Match governorate using robust Arabic normalization
+  let cleanGovernorate = rawGovernorate;
+  let governorateMatched = false;
+  let calculatedShippingCost: number | null = null;
+
+  if (rawGovernorate) {
+    const match = matchGovernorate(rawGovernorate, shippingRates);
+    if (match.matched && match.standardName && match.rate !== undefined) {
+      cleanGovernorate = match.standardName;
+      calculatedShippingCost = match.rate;
+      governorateMatched = true;
+    }
+  }
+
   // Numeric fields
   const rawTotal = getValue("order_total");
-  const orderTotal = rawTotal !== undefined && rawTotal !== null && rawTotal !== ""
-    ? Number(rawTotal)
-    : NaN;
+  const orderTotal =
+    rawTotal !== undefined && rawTotal !== null && rawTotal !== ""
+      ? Number(rawTotal)
+      : NaN;
 
   const rawPaid = getValue("paid_amount");
-  const paidAmount = rawPaid !== undefined && rawPaid !== null && rawPaid !== ""
-    ? Number(rawPaid)
-    : 0;
+  const paidAmount =
+    rawPaid !== undefined && rawPaid !== null && rawPaid !== ""
+      ? Number(rawPaid)
+      : 0;
 
+  // Auto-assign governorate shipping cost if matched; fallback to sheet shipping column or 0
   const rawShipping = getValue("shipping_cost");
-  const shippingCost = rawShipping !== undefined && rawShipping !== null && rawShipping !== ""
-    ? Number(rawShipping)
-    : 0;
+  let shippingCost =
+    calculatedShippingCost !== null
+      ? calculatedShippingCost
+      : rawShipping !== undefined && rawShipping !== null && rawShipping !== ""
+      ? Number(rawShipping)
+      : 0;
 
   let orderDate = getValue("order_date") ? String(getValue("order_date")).trim() : "";
   if (!orderDate || !/^\d{4}-\d{2}-\d{2}$/.test(orderDate)) {
@@ -248,8 +276,10 @@ export function validateImportRow(
     errors.push("صيغة رقم الهاتف الاحتياطي غير صالحة");
   }
 
-  if (!governorate) {
+  if (!rawGovernorate) {
     errors.push("المحافظة مطلوبة");
+  } else if (!governorateMatched) {
+    errors.push("المحافظة غير معروفة - يرجى تحديدها يدوياً");
   }
 
   if (!address) {
@@ -272,36 +302,26 @@ export function validateImportRow(
     errors.push("سعر الشحن يجب أن يكون رقماً موجباً أو صفر");
   }
 
-  if (errors.length > 0) {
-    return {
-      rowNumber,
-      raw: rawRow,
-      isValid: false,
-      errors,
-      data: null,
-    };
-  }
-
-  const codAmount = calculateCod(orderTotal, paidAmount);
-  const netProfit = calculateNetProfit(orderTotal, shippingCost);
-  const paymentStatus = derivePaymentStatus(orderTotal, paidAmount);
+  const codAmount = !isNaN(orderTotal) ? calculateCod(orderTotal, paidAmount) : 0;
+  const netProfit = !isNaN(orderTotal) ? calculateNetProfit(orderTotal, shippingCost) : 0;
+  const paymentStatus = !isNaN(orderTotal) ? derivePaymentStatus(orderTotal, paidAmount) : "unpaid";
 
   const cleanOrder: OrderInsert = {
     order_date: orderDate,
     customer_name: customerName,
     phone_primary: phonePrimary,
     phone_secondary: phoneSecondary || null,
-    governorate: governorate,
+    governorate: cleanGovernorate,
     address: address,
     landmark: landmark || null,
     important_notes: importantNotes || null,
-    order_total: orderTotal,
-    paid_amount: paidAmount,
+    order_total: isNaN(orderTotal) ? 0 : orderTotal,
+    paid_amount: isNaN(paidAmount) ? 0 : paidAmount,
     cod_amount: codAmount,
     shipping_cost: shippingCost,
     net_profit: netProfit,
     payment_status: paymentStatus,
-    print_status: "pending", // Immediately queued for printing!
+    print_status: "pending",
     delivery_status: "new",
     settlement_status: "pending",
   };
@@ -309,9 +329,13 @@ export function validateImportRow(
   return {
     rowNumber,
     raw: rawRow,
-    isValid: true,
-    errors: [],
+    isValid: errors.length === 0,
+    errors,
     data: cleanOrder,
+    governorateMatched,
+    governorateRaw: rawGovernorate,
+    isDuplicate: false,
+    skipDuplicate: false,
   };
 }
 

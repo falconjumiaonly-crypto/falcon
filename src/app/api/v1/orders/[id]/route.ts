@@ -31,6 +31,7 @@ export async function GET(request: NextRequest, { params }: Params) {
       .from("orders")
       .select("*")
       .eq("id", id)
+      .is("deleted_at", null)
       .maybeSingle();
 
     if (error) {
@@ -166,3 +167,35 @@ export async function PATCH(request: NextRequest, { params }: Params) {
     return NextResponse.json({ success: false, error: msg }, { status: 500 });
   }
 }
+
+/**
+ * DELETE /api/v1/orders/[id]
+ */
+export async function DELETE(request: NextRequest, { params }: Params) {
+  if (!verifyApiKey(request)) {
+    return createUnauthorizedResponse();
+  }
+
+  try {
+    const { id } = await params;
+    const supabase = await getAutomationSupabaseClient();
+
+    const { error } = await (supabase
+      .from("orders") as any)
+      .update({
+        deleted_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", id);
+
+    if (error) {
+      return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    }
+
+    return NextResponse.json({ success: true, message: "تم حذف الأوردر بنجاح", id });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "خطأ غير متوقع";
+    return NextResponse.json({ success: false, error: msg }, { status: 500 });
+  }
+}
+

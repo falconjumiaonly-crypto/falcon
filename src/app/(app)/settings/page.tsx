@@ -1,9 +1,10 @@
 import { getAppSettingsAction } from "@/app/actions/settings";
 import { SettingsView } from "@/components/settings/SettingsView";
+import { DEFAULT_GOVERNORATES } from "@/lib/governorates";
 
 export const metadata = {
   title: "الإعدادات والتكاملات | فلكون Falcon",
-  description: "إدارة هوية وشعار فلكون، إعدادات الطباعة، ومفاتيح تكامل Make.com و n8n",
+  description: "إدارة هوية وشعار فلكون، إعدادات الطباعة، أسعار الشحن، ومفاتيح تكامل Make.com و n8n",
 };
 
 export default async function SettingsPage() {
@@ -29,6 +30,7 @@ export default async function SettingsPage() {
         order_settled: true,
       },
     },
+    shippingRates: DEFAULT_GOVERNORATES,
   };
 
   const settings = res.success && res.data ? res.data : fallbackSettings;

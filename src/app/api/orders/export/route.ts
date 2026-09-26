@@ -19,7 +19,11 @@ export async function GET(request: NextRequest) {
     const type = searchParams.get("type"); // 'carrier_settlement' | 'standard'
     const rawIds = searchParams.get("ids");
 
-    let query = supabase.from("orders").select("*").order("created_at", { ascending: false });
+    let query = supabase
+      .from("orders")
+      .select("*")
+      .is("deleted_at", null)
+      .order("created_at", { ascending: false });
 
     if (type === "carrier_settlement") {
       // Only delivered orders with pending settlement
@@ -96,7 +100,11 @@ export async function POST(request: NextRequest) {
       fileNamePrefix = "Falcon_Orders",
     } = body;
 
-    let query = supabase.from("orders").select("*").order("created_at", { ascending: false });
+    let query = supabase
+      .from("orders")
+      .select("*")
+      .is("deleted_at", null)
+      .order("created_at", { ascending: false });
 
     if (exportType === "carrier_settlement") {
       query = query.eq("delivery_status", "delivered").eq("settlement_status", "pending");

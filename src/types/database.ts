@@ -88,6 +88,7 @@ export type Database = {
           settled_at: string | null;
           settlement_status: SettlementStatus;
           shipping_cost: number;
+          deleted_at: string | null;
           updated_at: string;
         };
         Insert: {
@@ -112,6 +113,7 @@ export type Database = {
           settled_at?: string | null;
           settlement_status?: SettlementStatus;
           shipping_cost: number;
+          deleted_at?: string | null;
           updated_at?: string;
         };
         Update: {
@@ -136,6 +138,7 @@ export type Database = {
           settled_at?: string | null;
           settlement_status?: SettlementStatus;
           shipping_cost?: number;
+          deleted_at?: string | null;
           updated_at?: string;
         };
         Relationships: [];
@@ -181,4 +184,10 @@ export interface FalconWebhookSettings {
     order_delivered: boolean;
     order_settled: boolean;
   };
+}
+
+export interface GovernorateRate {
+  name: string;
+  rate: number;
+  aliases?: string[];
 }
