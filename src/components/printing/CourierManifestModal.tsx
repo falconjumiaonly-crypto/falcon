@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import { createPortal } from "react-dom";
 import {
   Printer,
   X,
@@ -21,6 +22,7 @@ import {
   generateDeliveryManifest,
   DeliveryManifestData,
 } from "@/lib/printQueueOrchestrator";
+import { printManifestIsolated } from "@/lib/printManifestHelper";
 
 interface CourierManifestModalProps {
   isOpen: boolean;
@@ -43,8 +45,13 @@ export function CourierManifestModal({
   const [isHandingOver, setIsHandingOver] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [copyFeedback, setCopyFeedback] = useState(false);
+  const [isMounted, setIsMounted] = useState(false);
 
-  if (!isOpen || orders.length === 0) return null;
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
+  if (!isOpen || orders.length === 0 || !isMounted) return null;
 
   const manifestData: DeliveryManifestData = generateDeliveryManifest(orders, {
     carrierName,
@@ -53,7 +60,9 @@ export function CourierManifestModal({
   });
 
   const handlePrint = () => {
-    window.print();
+    printManifestIsolated("courier-manifest-content", {
+      title: `كشف تسليم شحنات - ${manifestData.manifestNumber} - Falcon`,
+    });
   };
 
   const handleCopySummary = () => {
@@ -124,13 +133,12 @@ ${govSummaryText}`;
         const success = await onHandoverAction(orderIds, carrierName);
         if (success) {
           setStatusMessage("تم تسليم الشحنات للمندوب بنجاح ونقلها لحالة الشحن!");
-          window.print();
           if (onHandoverSuccess) {
-            setTimeout(() => {
-              onHandoverSuccess();
-              onClose();
-            }, 1200);
+            onHandoverSuccess();
           }
+          await printManifestIsolated("courier-manifest-content", {
+            title: `كشف تسليم شحنات - ${manifestData.manifestNumber} - Falcon`,
+          });
         } else {
           setStatusMessage("حدث خطأ أثناء تحديث حالة الشحنات");
         }
@@ -140,41 +148,72 @@ ${govSummaryText}`;
         setIsHandingOver(false);
       }
     } else {
-      window.print();
+      handlePrint();
     }
   };
 
-  return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-2 sm:p-4 print:p-0 print:bg-white print:static print:inset-auto">
+  return createPortal(
+    <div
+      id="falcon-manifest-modal-portal-root"
+      className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-2 sm:p-4 print:p-0 print:bg-white print:static print:inset-auto print:overflow-visible"
+    >
       {/* Dynamic Print Stylesheet for Clean Manifest Output */}
       <style
         dangerouslySetInnerHTML={{
           __html: `
             @media print {
-              body * {
-                visibility: hidden;
+              body > *:not(#falcon-manifest-modal-portal-root) {
+                display: none !important;
+              }
+              #falcon-manifest-modal-portal-root {
+                display: block !important;
+                position: static !important;
+                width: 100% !important;
+                height: auto !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                background: white !important;
+                overflow: visible !important;
+              }
+              .manifest-modal-card-wrapper {
+                display: block !important;
+                position: static !important;
+                width: 100% !important;
+                max-width: none !important;
+                height: auto !important;
+                max-height: none !important;
+                border: none !important;
+                box-shadow: none !important;
+                border-radius: 0 !important;
+                overflow: visible !important;
+                padding: 0 !important;
+                margin: 0 !important;
               }
               #courier-manifest-content, #courier-manifest-content * {
-                visibility: visible;
+                visibility: visible !important;
               }
               #courier-manifest-content {
-                position: absolute;
-                left: 0;
-                top: 0;
-                width: 100%;
-                margin: 0;
-                padding: 10mm;
+                display: block !important;
+                position: static !important;
+                width: 100% !important;
+                height: auto !important;
+                max-height: none !important;
+                margin: 0 !important;
+                padding: 6mm 4mm !important;
                 background: white !important;
                 color: black !important;
+                overflow: visible !important;
               }
-              .no-print-manifest {
+              .no-print-manifest, .no-print {
                 display: none !important;
               }
               tr {
-                page-break-inside: avoid;
+                page-break-inside: avoid !important;
+                break-inside: avoid !important;
               }
               .manifest-signatures {
-                page-break-inside: avoid;
+                page-break-inside: avoid !important;
+                break-inside: avoid !important;
               }
               @page {
                 size: A4 portrait;
@@ -185,7 +224,7 @@ ${govSummaryText}`;
         }}
       />
 
-      <div className="bg-white rounded-2xl w-full max-w-4xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[92vh] print:max-h-none print:shadow-none print:border-none print:rounded-none">
+      <div className="manifest-modal-card-wrapper bg-white rounded-2xl w-full max-w-4xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[92vh] print:max-h-none print:shadow-none print:border-none print:rounded-none print:overflow-visible">
         {/* Modal Header (Hidden in Print) */}
         <div className="no-print-manifest bg-slate-900 text-white p-4 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
@@ -278,7 +317,7 @@ ${govSummaryText}`;
         {/* Printable Manifest Sheet Content */}
         <div
           id="courier-manifest-content"
-          className="flex-1 overflow-y-auto p-4 sm:p-6 text-slate-900 bg-white font-sans text-xs"
+          className="flex-1 overflow-y-auto p-4 sm:p-6 text-slate-900 bg-white font-sans text-xs print:overflow-visible print:p-0 print:h-auto"
           dir="rtl"
         >
           {/* Manifest Official Header */}
@@ -533,6 +572,7 @@ ${govSummaryText}`;
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
