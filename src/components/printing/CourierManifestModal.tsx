@@ -22,7 +22,10 @@ import {
   generateDeliveryManifest,
   DeliveryManifestData,
 } from "@/lib/printQueueOrchestrator";
-import { printManifestIsolated } from "@/lib/printManifestHelper";
+import {
+  printManifestIsolated,
+  openManifestPrintPage,
+} from "@/lib/printManifestHelper";
 
 interface CourierManifestModalProps {
   isOpen: boolean;
@@ -60,9 +63,15 @@ export function CourierManifestModal({
   });
 
   const handlePrint = () => {
-    printManifestIsolated("courier-manifest-content", {
-      title: `كشف تسليم شحنات - ${manifestData.manifestNumber} - Falcon`,
-    });
+    openManifestPrintPage(
+      orders.map((o) => o.id),
+      {
+        carrierName,
+        driverName,
+        driverPhone,
+        autoPrint: true,
+      }
+    );
   };
 
   const handleCopySummary = () => {
@@ -136,8 +145,11 @@ ${govSummaryText}`;
           if (onHandoverSuccess) {
             onHandoverSuccess();
           }
-          await printManifestIsolated("courier-manifest-content", {
-            title: `كشف تسليم شحنات - ${manifestData.manifestNumber} - Falcon`,
+          openManifestPrintPage(orderIds, {
+            carrierName,
+            driverName,
+            driverPhone,
+            autoPrint: true,
           });
         } else {
           setStatusMessage("حدث خطأ أثناء تحديث حالة الشحنات");
@@ -162,48 +174,6 @@ ${govSummaryText}`;
         dangerouslySetInnerHTML={{
           __html: `
             @media print {
-              body > *:not(#falcon-manifest-modal-portal-root) {
-                display: none !important;
-              }
-              #falcon-manifest-modal-portal-root {
-                display: block !important;
-                position: static !important;
-                width: 100% !important;
-                height: auto !important;
-                margin: 0 !important;
-                padding: 0 !important;
-                background: white !important;
-                overflow: visible !important;
-              }
-              .manifest-modal-card-wrapper {
-                display: block !important;
-                position: static !important;
-                width: 100% !important;
-                max-width: none !important;
-                height: auto !important;
-                max-height: none !important;
-                border: none !important;
-                box-shadow: none !important;
-                border-radius: 0 !important;
-                overflow: visible !important;
-                padding: 0 !important;
-                margin: 0 !important;
-              }
-              #courier-manifest-content, #courier-manifest-content * {
-                visibility: visible !important;
-              }
-              #courier-manifest-content {
-                display: block !important;
-                position: static !important;
-                width: 100% !important;
-                height: auto !important;
-                max-height: none !important;
-                margin: 0 !important;
-                padding: 6mm 4mm !important;
-                background: white !important;
-                color: black !important;
-                overflow: visible !important;
-              }
               .no-print-manifest, .no-print {
                 display: none !important;
               }
