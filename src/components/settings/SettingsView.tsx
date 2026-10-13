@@ -40,7 +40,9 @@ import {
   testWebhookAction,
   testCarrierWebhookAction,
   saveShippingRatesAction,
+  saveCarrierConfigsAction,
 } from "@/app/actions/settings";
+import { CarrierConfig, DEFAULT_CARRIER_CONFIGS } from "@/lib/carriers/carrierConfig";
 import { DEFAULT_GOVERNORATES } from "@/lib/governorates";
 import { GovernorateRate } from "@/types/database";
 
@@ -49,7 +51,21 @@ interface SettingsViewProps {
 }
 
 export function SettingsView({ initialSettings }: SettingsViewProps) {
-  const [activeTab, setActiveTab] = useState<"branding" | "shipping" | "rates" | "api">("branding");
+  const [activeTab, setActiveTab] = useState<"branding" | "shipping" | "carriers" | "rates" | "api">("branding");
+
+  // Carrier Fleet & Configurations State
+  const [carrierConfigs, setCarrierConfigs] = useState<CarrierConfig[]>(
+    initialSettings.carrierConfigs?.length ? initialSettings.carrierConfigs : DEFAULT_CARRIER_CONFIGS
+  );
+  const [isSavingCarriers, setIsSavingCarriers] = useState(false);
+  const [showAddCarrier, setShowAddCarrier] = useState(false);
+  const [newCarrierNameAr, setNewCarrierNameAr] = useState("");
+  const [newCarrierNameEn, setNewCarrierNameEn] = useState("");
+  const [newCarrierBaseCost, setNewCarrierBaseCost] = useState<number | "">(60);
+  const [newCarrierDays, setNewCarrierDays] = useState<number | "">(2);
+  const [newCarrierRate, setNewCarrierRate] = useState<number | "">(90);
+  const [newCarrierPhone, setNewCarrierPhone] = useState("");
+  const [newCarrierNotes, setNewCarrierNotes] = useState("");
 
   // Shipping Rates State
   const [shippingRates, setShippingRates] = useState<GovernorateRate[]>(
@@ -387,6 +403,83 @@ export function SettingsView({ initialSettings }: SettingsViewProps) {
     }
   };
 
+  const handleToggleCarrierActive = (id: string) => {
+    setCarrierConfigs((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, isActive: !c.isActive } : c))
+    );
+  };
+
+  const handleUpdateCarrierField = (
+    id: string,
+    field: keyof CarrierConfig,
+    value: any
+  ) => {
+    setCarrierConfigs((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, [field]: value } : c))
+    );
+  };
+
+  const handleRemoveCarrier = (id: string) => {
+    if (confirm("هل أنت متأكد من حذف شركة الشحن هذه؟")) {
+      setCarrierConfigs((prev) => prev.filter((c) => c.id !== id));
+      showStatus("success", "تم حذف شركة الشحن");
+    }
+  };
+
+  const handleAddCustomCarrier = () => {
+    if (!newCarrierNameAr.trim()) {
+      showStatus("error", "يرجى إدخال اسم شركة الشحن بالعربية");
+      return;
+    }
+    const id = "custom_" + Date.now().toString(36);
+    const newCarrier: CarrierConfig = {
+      id,
+      nameAr: newCarrierNameAr.trim(),
+      nameEn: newCarrierNameEn.trim() || newCarrierNameAr.trim(),
+      isActive: true,
+      baseCost: Number(newCarrierBaseCost) || 60,
+      avgDeliveryDays: Number(newCarrierDays) || 2,
+      expectedDeliveryRate: Number(newCarrierRate) || 90,
+      supportPhone: newCarrierPhone.trim(),
+      notes: newCarrierNotes.trim(),
+      allowOpenPackage: true,
+      isCustom: true,
+    };
+    setCarrierConfigs((prev) => [...prev, newCarrier]);
+    setNewCarrierNameAr("");
+    setNewCarrierNameEn("");
+    setNewCarrierBaseCost(60);
+    setNewCarrierDays(2);
+    setNewCarrierRate(90);
+    setNewCarrierPhone("");
+    setNewCarrierNotes("");
+    setShowAddCarrier(false);
+    showStatus("success", `تمت إضافة شركة الشحن ${newCarrier.nameAr} بنجاح`);
+  };
+
+  const handleResetDefaultCarriers = () => {
+    if (confirm("هل تريد استعادة شركات الشحن الافتراضية (بوسطة، J&T، أرامكس، مايلرز، شحن ذاتي)؟")) {
+      setCarrierConfigs(DEFAULT_CARRIER_CONFIGS);
+      showStatus("success", "تمت استعادة شركات الشحن الافتراضية (لا تنسَ الضغط على حفظ الشركات)");
+    }
+  };
+
+  const handleSaveCarriers = async () => {
+    setIsSavingCarriers(true);
+    try {
+      const res = await saveCarrierConfigsAction(carrierConfigs);
+      if (res.success) {
+        showStatus("success", "تم حفظ إعدادات شركات الشحن والمناديب بنجاح في قاعدة البيانات!");
+      } else {
+        showStatus("error", res.error || "فشل حفظ شركات الشحن");
+      }
+    } catch {
+      showStatus("error", "حدث خطأ أثناء حفظ شركات الشحن");
+    } finally {
+      setIsSavingCarriers(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -396,7 +489,7 @@ export function SettingsView({ initialSettings }: SettingsViewProps) {
             الإعدادات والتكاملات
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            إدارة هوية شركة فلكون، الشعار المطبوع على البوالص، وبيانات تكامل Make.com و n8n.
+            إدارة هوية شركة فلكون، الشعار المطبوع، شركات الشحن والمناديب، وأسعار المحافظات.
           </p>
         </div>
 
@@ -420,10 +513,10 @@ export function SettingsView({ initialSettings }: SettingsViewProps) {
       </div>
 
       {/* Navigation Tabs */}
-      <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
+      <div className="flex items-center gap-2 border-b border-slate-200 pb-2 overflow-x-auto">
         <button
           onClick={() => setActiveTab("branding")}
-          className={`px-4 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2 ${
+          className={`px-4 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2 whitespace-nowrap cursor-pointer ${
             activeTab === "branding"
               ? "bg-blue-600 text-white shadow-md shadow-blue-600/20"
               : "bg-white text-slate-600 hover:bg-slate-100 border border-slate-200"
@@ -434,8 +527,20 @@ export function SettingsView({ initialSettings }: SettingsViewProps) {
         </button>
 
         <button
+          onClick={() => setActiveTab("carriers")}
+          className={`px-4 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+            activeTab === "carriers"
+              ? "bg-blue-600 text-white shadow-md shadow-blue-600/20"
+              : "bg-white text-slate-600 hover:bg-slate-100 border border-slate-200"
+          }`}
+        >
+          <Truck className="w-4 h-4" />
+          <span>شركات الشحن والمناديب</span>
+        </button>
+
+        <button
           onClick={() => setActiveTab("shipping")}
-          className={`px-4 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2 ${
+          className={`px-4 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2 whitespace-nowrap cursor-pointer ${
             activeTab === "shipping"
               ? "bg-blue-600 text-white shadow-md shadow-blue-600/20"
               : "bg-white text-slate-600 hover:bg-slate-100 border border-slate-200"
@@ -447,13 +552,13 @@ export function SettingsView({ initialSettings }: SettingsViewProps) {
 
         <button
           onClick={() => setActiveTab("rates")}
-          className={`px-4 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2 ${
+          className={`px-4 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2 whitespace-nowrap cursor-pointer ${
             activeTab === "rates"
               ? "bg-blue-600 text-white shadow-md shadow-blue-600/20"
               : "bg-white text-slate-600 hover:bg-slate-100 border border-slate-200"
           }`}
         >
-          <Truck className="w-4 h-4" />
+          <FileText className="w-4 h-4" />
           <span>أسعار شحن المحافظات</span>
         </button>
 
@@ -1352,6 +1457,392 @@ export function SettingsView({ initialSettings }: SettingsViewProps) {
                 <span>{mcpTestResult.message}</span>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================= */}
+      {/* TAB: CARRIERS & FLEET MANAGEMENT                          */}
+      {/* ========================================================= */}
+      {activeTab === "carriers" && (
+        <div className="space-y-6">
+          <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                <Truck className="w-5 h-5 text-blue-600" />
+                <span>إدارة شركات الشحن والمناديب (Carriers Fleet)</span>
+              </h2>
+              <p className="text-xs text-slate-500 mt-1">
+                التحكم في شركات الشحن النشطة، تعديل الأسعار الأساسية، نسب التسليم المتوقعة، ومفاتيح التكامل وأرقام المتابعة.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowAddCarrier((prev) => !prev)}
+                className="px-3.5 py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer border border-blue-200"
+              >
+                <Plus className="w-4 h-4" />
+                <span>إضافة شركة شحن جديدة</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleResetDefaultCarriers}
+                className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
+                title="استعادة الشركات الخمس الافتراضية"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>استعادة الافتراضي</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleSaveCarriers}
+                disabled={isSavingCarriers}
+                className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl transition-all shadow-md shadow-blue-500/20 flex items-center gap-2 disabled:opacity-50 cursor-pointer"
+              >
+                {isSavingCarriers ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>جاري الحفظ...</span>
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-4 h-4" />
+                    <span>حفظ شركات الشحن</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* Add Carrier Form */}
+          {showAddCarrier && (
+            <div className="bg-blue-50/70 border border-blue-200 p-5 rounded-2xl space-y-4 animate-in fade-in duration-200">
+              <div className="flex items-center justify-between border-b border-blue-200 pb-2">
+                <h3 className="text-sm font-bold text-blue-900 flex items-center gap-2">
+                  <Plus className="w-4 h-4 text-blue-600" />
+                  <span>إضافة شركة شحن أو مندوب خاص جديد</span>
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setShowAddCarrier(false)}
+                  className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">اسم الشركة (بالعربية) *</label>
+                  <input
+                    type="text"
+                    value={newCarrierNameAr}
+                    onChange={(e) => setNewCarrierNameAr(e.target.value)}
+                    placeholder="مثال: رابيدو إكسبريس أو مندوب أحمد"
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-medium focus:outline-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">اسم الشركة (بالإنجليزية)</label>
+                  <input
+                    type="text"
+                    value={newCarrierNameEn}
+                    onChange={(e) => setNewCarrierNameEn(e.target.value)}
+                    placeholder="مثال: Rapido Express"
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-medium focus:outline-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">سعر الشحن الأساسي (ج.م)</label>
+                  <input
+                    type="number"
+                    value={newCarrierBaseCost}
+                    onChange={(e) => setNewCarrierBaseCost(e.target.value === "" ? "" : Number(e.target.value))}
+                    placeholder="60"
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-bold text-blue-700 focus:outline-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">مدة التوصيل (أيام)</label>
+                  <input
+                    type="number"
+                    step="0.5"
+                    value={newCarrierDays}
+                    onChange={(e) => setNewCarrierDays(e.target.value === "" ? "" : Number(e.target.value))}
+                    placeholder="2"
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-medium focus:outline-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">نسبة التسليم المتوقعة (%)</label>
+                  <input
+                    type="number"
+                    value={newCarrierRate}
+                    onChange={(e) => setNewCarrierRate(e.target.value === "" ? "" : Number(e.target.value))}
+                    placeholder="90"
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-medium focus:outline-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">رقم خدمة العملاء / المندوب</label>
+                  <input
+                    type="text"
+                    value={newCarrierPhone}
+                    onChange={(e) => setNewCarrierPhone(e.target.value)}
+                    placeholder="01012345678 أو الخط الساخن"
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-medium focus:outline-blue-500"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="block font-bold text-slate-700 mb-1">ملاحظات ومناطق التغطية</label>
+                  <input
+                    type="text"
+                    value={newCarrierNotes}
+                    onChange={(e) => setNewCarrierNotes(e.target.value)}
+                    placeholder="مثال: يغطي الجيزة وأكتوبر، تسليم خلال 24 ساعة"
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-medium focus:outline-blue-500"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-blue-200">
+                <button
+                  type="button"
+                  onClick={() => setShowAddCarrier(false)}
+                  className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-bold rounded-xl cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAddCustomCarrier}
+                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl cursor-pointer shadow-sm"
+                >
+                  إضافة الشركة للأسطول
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Carriers Cards Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {carrierConfigs.map((carrier) => (
+              <div
+                key={carrier.id}
+                className={`p-5 rounded-2xl border transition-all space-y-4 ${
+                  carrier.isActive
+                    ? "bg-white border-slate-200 shadow-sm hover:border-blue-300"
+                    : "bg-slate-50/70 border-slate-200 opacity-75"
+                }`}
+              >
+                {/* Header */}
+                <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                  <div className="flex items-center gap-3">
+                    <div
+                      className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold text-lg ${
+                        carrier.isActive
+                          ? "bg-blue-100 text-blue-700"
+                          : "bg-slate-200 text-slate-500"
+                      }`}
+                    >
+                      🚚
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={carrier.nameAr}
+                          onChange={(e) =>
+                            handleUpdateCarrierField(carrier.id, "nameAr", e.target.value)
+                          }
+                          className="font-bold text-slate-900 text-sm bg-transparent border-b border-transparent hover:border-slate-300 focus:border-blue-500 focus:outline-none"
+                        />
+                        {carrier.isCustom && (
+                          <span className="px-2 py-0.5 bg-amber-50 text-amber-700 border border-amber-200 rounded-md text-[10px] font-bold">
+                            مخصصة
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-[11px] text-slate-400 font-mono">
+                        {carrier.nameEn || carrier.id}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleToggleCarrierActive(carrier.id)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                        carrier.isActive
+                          ? "bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100"
+                          : "bg-slate-100 text-slate-500 border border-slate-200 hover:bg-slate-200"
+                      }`}
+                    >
+                      <span
+                        className={`w-2 h-2 rounded-full ${
+                          carrier.isActive ? "bg-emerald-500" : "bg-slate-400"
+                        }`}
+                      ></span>
+                      <span>{carrier.isActive ? "مفعلة بالمنظومة" : "معطلة"}</span>
+                    </button>
+
+                    {carrier.isCustom && (
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveCarrier(carrier.id)}
+                        className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg cursor-pointer transition-colors"
+                        title="حذف هذه الشركة المخصصة"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Form fields */}
+                <div className="grid grid-cols-3 gap-3 text-xs">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                      سعر الشحن (ج.م)
+                    </label>
+                    <input
+                      type="number"
+                      value={carrier.baseCost}
+                      onChange={(e) =>
+                        handleUpdateCarrierField(
+                          carrier.id,
+                          "baseCost",
+                          Number(e.target.value) || 0
+                        )
+                      }
+                      className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-blue-700 focus:bg-white focus:border-blue-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                      مدة التوصيل (يوم)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      value={carrier.avgDeliveryDays}
+                      onChange={(e) =>
+                        handleUpdateCarrierField(
+                          carrier.id,
+                          "avgDeliveryDays",
+                          Number(e.target.value) || 1
+                        )
+                      }
+                      className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl font-medium focus:bg-white focus:border-blue-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                      نسبة التسليم (%)
+                    </label>
+                    <input
+                      type="number"
+                      value={carrier.expectedDeliveryRate}
+                      onChange={(e) =>
+                        handleUpdateCarrierField(
+                          carrier.id,
+                          "expectedDeliveryRate",
+                          Number(e.target.value) || 0
+                        )
+                      }
+                      className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl font-medium focus:bg-white focus:border-blue-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                {/* Account & Support */}
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                      كود العقد / رقم الحساب
+                    </label>
+                    <input
+                      type="text"
+                      value={carrier.merchantAccountId || ""}
+                      onChange={(e) =>
+                        handleUpdateCarrierField(
+                          carrier.id,
+                          "merchantAccountId",
+                          e.target.value
+                        )
+                      }
+                      placeholder="كود الحساب في الشركة"
+                      className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-mono focus:bg-white focus:border-blue-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                      هاتف المندوب / الخط الساخن
+                    </label>
+                    <input
+                      type="text"
+                      value={carrier.supportPhone || ""}
+                      onChange={(e) =>
+                        handleUpdateCarrierField(
+                          carrier.id,
+                          "supportPhone",
+                          e.target.value
+                        )
+                      }
+                      placeholder="19xxx أو 01xxxx"
+                      className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-mono focus:bg-white focus:border-blue-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                {/* API Key / Token */}
+                <div className="text-xs">
+                  <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                    مفتاح الربط البرمجي (API Key / Token)
+                  </label>
+                  <input
+                    type="password"
+                    value={carrier.apiKey || ""}
+                    onChange={(e) =>
+                      handleUpdateCarrierField(carrier.id, "apiKey", e.target.value)
+                    }
+                    placeholder="مفتاح الـ API للربط المباشر مع بوابة الشركة"
+                    className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-mono focus:bg-white focus:border-blue-500 focus:outline-none"
+                  />
+                </div>
+
+                {/* Open package & Notes */}
+                <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs">
+                  <label className="flex items-center gap-2 cursor-pointer text-[11px] font-medium text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={carrier.allowOpenPackage}
+                      onChange={(e) =>
+                        handleUpdateCarrierField(
+                          carrier.id,
+                          "allowOpenPackage",
+                          e.target.checked
+                        )
+                      }
+                      className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    <span>السماح بفتح الشحنة والمعاينة</span>
+                  </label>
+
+                  <span className="text-[11px] text-slate-400 truncate max-w-[200px]" title={carrier.notes}>
+                    {carrier.notes || "لا توجد ملاحظات إضافية"}
+                  </span>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       )}

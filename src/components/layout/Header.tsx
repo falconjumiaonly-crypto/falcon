@@ -1,9 +1,14 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { usePathname } from "next/navigation";
 import { Menu, Calendar, ShieldCheck, Bot, Star } from "lucide-react";
 import { useEffect, useState } from "react";
-import { CustomerFeedbackModal } from "@/components/feedback/CustomerFeedbackModal";
+
+const CustomerFeedbackModal = dynamic(
+  () => import("@/components/feedback/CustomerFeedbackModal").then((m) => m.CustomerFeedbackModal),
+  { ssr: false }
+);
 
 interface HeaderProps {
   onToggleSidebar: () => void;

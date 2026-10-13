@@ -10,11 +10,15 @@ import {
 } from "@/types/database";
 import { DEFAULT_GOVERNORATES } from "@/lib/governorates";
 
+import { CarrierConfig, DEFAULT_CARRIER_CONFIGS } from "@/lib/carriers/carrierConfig";
+export type { CarrierConfig };
+
 export interface AppSettingsBundle {
   branding: FalconBrandingSettings;
   companyInfo: FalconCompanyInfoSettings;
   webhook: FalconWebhookSettings;
   shippingRates: GovernorateRate[];
+  carrierConfigs: CarrierConfig[];
 }
 
 const DEFAULT_BRANDING: FalconBrandingSettings = {
@@ -49,7 +53,7 @@ export async function getAppSettingsAction(): Promise<{
     const { data, error } = await supabase
       .from("app_settings")
       .select("key, value")
-      .in("key", ["branding", "company_info", "webhook_config", "shipping_rates"]);
+      .in("key", ["branding", "company_info", "webhook_config", "shipping_rates", "carrier_configs"]);
 
     if (error) {
       return { success: false, error: error.message };
@@ -67,6 +71,10 @@ export async function getAppSettingsAction(): Promise<{
       Array.isArray(settingsMap["shipping_rates"]) && (settingsMap["shipping_rates"] as GovernorateRate[]).length > 0
         ? (settingsMap["shipping_rates"] as GovernorateRate[])
         : DEFAULT_GOVERNORATES;
+    const carrierConfigs =
+      Array.isArray(settingsMap["carrier_configs"]) && (settingsMap["carrier_configs"] as CarrierConfig[]).length > 0
+        ? (settingsMap["carrier_configs"] as CarrierConfig[])
+        : DEFAULT_CARRIER_CONFIGS;
 
     return {
       success: true,
@@ -75,10 +83,68 @@ export async function getAppSettingsAction(): Promise<{
         companyInfo: { ...DEFAULT_COMPANY_INFO, ...companyInfo },
         webhook: { ...DEFAULT_WEBHOOK, ...webhook },
         shippingRates,
+        carrierConfigs,
       },
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : "تعذر استرجاع الإعدادات";
+    return { success: false, error: msg };
+  }
+}
+
+export async function saveCarrierConfigsAction(
+  carriers: CarrierConfig[]
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const supabase = await createClient();
+    const { error } = await (supabase.from("app_settings") as any).upsert(
+      {
+        key: "carrier_configs",
+        value: carriers as any,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "key" }
+    );
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    revalidatePath("/settings");
+    revalidatePath("/orders");
+    return { success: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "فشل حفظ إعدادات شركات الشحن";
+    return { success: false, error: msg };
+  }
+}
+
+export async function getCarrierConfigsAction(): Promise<{
+  success: boolean;
+  data?: CarrierConfig[];
+  error?: string;
+}> {
+  try {
+    const supabase = await createClient();
+    const { data, error } = await supabase
+      .from("app_settings")
+      .select("value")
+      .eq("key", "carrier_configs")
+      .maybeSingle();
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    const row = data as { value?: unknown } | null;
+    const configs =
+      Array.isArray(row?.value) && (row.value as CarrierConfig[]).length > 0
+        ? (row.value as CarrierConfig[])
+        : DEFAULT_CARRIER_CONFIGS;
+
+    return { success: true, data: configs };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "تعذر استرجاع شركات الشحن";
     return { success: false, error: msg };
   }
 }

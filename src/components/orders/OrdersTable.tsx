@@ -42,17 +42,54 @@ import {
   getOrderTags,
   filterOrdersByTag,
 } from "@/lib/tags/tagsEngine";
+import dynamic from "next/dynamic";
 import { getOrderTagsMapAction, getCustomTagsAction } from "@/app/actions/tags";
-import { BulkOrderPasteModal } from "./BulkOrderPasteModal";
-import { CarrierExportModal } from "./CarrierExportModal";
 import { DispatchTrackerCards } from "./DispatchTrackerCards";
-import { BarcodeHandoverScannerModal } from "./BarcodeHandoverScannerModal";
-import { WhatsAppNotificationModal } from "./WhatsAppNotificationModal";
-import { CustomerBlacklistModal } from "@/components/risk/CustomerBlacklistModal";
-import { OrderTagsModal } from "@/components/tags/OrderTagsModal";
-import { OrderTimelineModal } from "@/components/orders/OrderTimelineModal";
-import { CourierManifestModal } from "@/components/printing/CourierManifestModal";
-import { SmartCarrierRoutingModal } from "@/components/orders/SmartCarrierRoutingModal";
+
+const BulkOrderPasteModal = dynamic(
+  () => import("./BulkOrderPasteModal").then((m) => m.BulkOrderPasteModal),
+  { ssr: false }
+);
+
+const CarrierExportModal = dynamic(
+  () => import("./CarrierExportModal").then((m) => m.CarrierExportModal),
+  { ssr: false }
+);
+
+const BarcodeHandoverScannerModal = dynamic(
+  () => import("./BarcodeHandoverScannerModal").then((m) => m.BarcodeHandoverScannerModal),
+  { ssr: false }
+);
+
+const WhatsAppNotificationModal = dynamic(
+  () => import("./WhatsAppNotificationModal").then((m) => m.WhatsAppNotificationModal),
+  { ssr: false }
+);
+
+const CustomerBlacklistModal = dynamic(
+  () => import("@/components/risk/CustomerBlacklistModal").then((m) => m.CustomerBlacklistModal),
+  { ssr: false }
+);
+
+const OrderTagsModal = dynamic(
+  () => import("@/components/tags/OrderTagsModal").then((m) => m.OrderTagsModal),
+  { ssr: false }
+);
+
+const OrderTimelineModal = dynamic(
+  () => import("@/components/orders/OrderTimelineModal").then((m) => m.OrderTimelineModal),
+  { ssr: false }
+);
+
+const CourierManifestModal = dynamic(
+  () => import("@/components/printing/CourierManifestModal").then((m) => m.CourierManifestModal),
+  { ssr: false }
+);
+
+const SmartCarrierRoutingModal = dynamic(
+  () => import("@/components/orders/SmartCarrierRoutingModal").then((m) => m.SmartCarrierRoutingModal),
+  { ssr: false }
+);
 import {
   getOrdersAction,
   updateOrderAction,

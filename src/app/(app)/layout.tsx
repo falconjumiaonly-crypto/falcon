@@ -1,11 +1,20 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useState } from "react";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { Header } from "@/components/layout/Header";
 import { WebMcpProvider } from "@/components/webmcp/WebMcpProvider";
-import { WebMcpInspectorModal } from "@/components/webmcp/WebMcpInspectorModal";
-import { MerchantCopilotWidget } from "@/components/copilot/MerchantCopilotWidget";
+
+const WebMcpInspectorModal = dynamic(
+  () => import("@/components/webmcp/WebMcpInspectorModal").then((m) => m.WebMcpInspectorModal),
+  { ssr: false }
+);
+
+const MerchantCopilotWidget = dynamic(
+  () => import("@/components/copilot/MerchantCopilotWidget").then((m) => m.MerchantCopilotWidget),
+  { ssr: false }
+);
 
 export default function AppLayout({
   children,

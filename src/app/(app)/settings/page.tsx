@@ -1,6 +1,7 @@
 import { getAppSettingsAction } from "@/app/actions/settings";
 import { SettingsView } from "@/components/settings/SettingsView";
 import { DEFAULT_GOVERNORATES } from "@/lib/governorates";
+import { DEFAULT_CARRIER_CONFIGS } from "@/lib/carriers/carrierConfig";
 
 export const metadata = {
   title: "الإعدادات والتكاملات | فلكون Falcon",
@@ -31,6 +32,7 @@ export default async function SettingsPage() {
       },
     },
     shippingRates: DEFAULT_GOVERNORATES,
+    carrierConfigs: DEFAULT_CARRIER_CONFIGS,
   };
 
   const settings = res.success && res.data ? res.data : fallbackSettings;
