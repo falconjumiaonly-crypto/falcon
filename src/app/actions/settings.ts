@@ -329,3 +329,22 @@ export async function testWebhookAction(
     return { success: false, error: msg };
   }
 }
+
+export async function testCarrierWebhookAction(
+  carrier: string,
+  payload: any
+): Promise<{ success: boolean; message: string; data?: any }> {
+  try {
+    const { processCarrierWebhook } = await import("@/lib/carriers/webhookProcessor");
+    const result = await processCarrierWebhook(carrier, payload);
+    return {
+      success: result.success,
+      message: result.message,
+      data: result,
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "خطأ غير متوقع";
+    return { success: false, message: msg };
+  }
+}
+

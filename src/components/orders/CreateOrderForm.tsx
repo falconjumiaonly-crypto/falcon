@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useTransition } from "react";
+import { useState, useEffect, useTransition, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import {
   User,
@@ -15,13 +15,30 @@ import {
   PackagePlus,
   ArrowRight,
   Clock,
+  ShieldAlert,
+  UserX,
+  Tag,
 } from "lucide-react";
 import { calculateCod, calculateNetProfit, formatEgp } from "@/lib/calculations";
 import { createOrderAction, findDuplicateOrdersAction } from "@/app/actions/orders";
 import { getShippingRatesAction } from "@/app/actions/settings";
+import { checkCustomerRiskAction } from "@/app/actions/risk";
+import { CustomerRiskProfile } from "@/lib/risk/customerRiskEngine";
+import { CustomerBlacklistModal } from "@/components/risk/CustomerBlacklistModal";
+import {
+  PRESET_TAGS,
+  extractTagsFromNotes,
+  embedTagsInNotes,
+} from "@/lib/tags/tagsEngine";
 import { DEFAULT_GOVERNORATES, matchGovernorate } from "@/lib/governorates";
+import {
+  getDistrictsForGovernorate,
+  detectGovernorateMisclassification,
+} from "@/lib/addressStandardizer";
 import { useOrderDraft, OrderFormData } from "@/hooks/useOrderDraft";
 import { Order, GovernorateRate } from "@/types/database";
+import { SmartOrderPasteBar } from "./SmartOrderPasteBar";
+import { BulkOrderPasteModal } from "./BulkOrderPasteModal";
 
 const commonGovernorates = [
   "القاهرة",
@@ -53,6 +70,7 @@ export function CreateOrderForm() {
   const {
     formData,
     updateField,
+    setFormData,
     clearDraft,
     hasRestoredDraft,
     lastSavedAt,
@@ -62,9 +80,45 @@ export function CreateOrderForm() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [createdOrder, setCreatedOrder] = useState<Order | null>(null);
 
+  const handleApplySmartPaste = (data: {
+    customer_name: string;
+    phone_primary: string;
+    phone_secondary: string;
+    governorate: string;
+    address: string;
+    landmark: string;
+    order_total: string;
+    paid_amount: string;
+    shipping_cost: string;
+    important_notes: string;
+  }) => {
+    setFormData((prev) => ({
+      ...prev,
+      customer_name: data.customer_name || prev.customer_name,
+      phone_primary: data.phone_primary || prev.phone_primary,
+      phone_secondary: data.phone_secondary || prev.phone_secondary,
+      governorate: data.governorate || prev.governorate,
+      address: data.address || prev.address,
+      landmark: data.landmark || prev.landmark,
+      order_total: data.order_total || prev.order_total,
+      paid_amount: data.paid_amount || prev.paid_amount,
+      shipping_cost: data.shipping_cost || prev.shipping_cost,
+      important_notes: data.important_notes
+        ? prev.important_notes
+          ? `${prev.important_notes} | ${data.important_notes}`
+          : data.important_notes
+        : prev.important_notes,
+    }));
+    if (data.governorate) {
+      setAutoMatchedGov(data.governorate);
+    }
+    if (errorMessage) setErrorMessage(null);
+  };
+
   // Governorate shipping rates state
   const [shippingRates, setShippingRates] = useState<GovernorateRate[]>(DEFAULT_GOVERNORATES);
   const [autoMatchedGov, setAutoMatchedGov] = useState<string | null>(null);
+  const [isBulkModalOpen, setIsBulkModalOpen] = useState(false);
 
   // Duplicate Order Warning State
   const [checkingDuplicate, setCheckingDuplicate] = useState(false);
@@ -72,6 +126,39 @@ export function CreateOrderForm() {
     reason: string;
     matchedOrder: Order;
   } | null>(null);
+
+  // Customer Fraud & Bad-Order Risk Scoring
+  const [customerRisk, setCustomerRisk] = useState<CustomerRiskProfile | null>(null);
+  const [checkingRisk, setCheckingRisk] = useState(false);
+  const [isBlacklistModalOpen, setIsBlacklistModalOpen] = useState(false);
+
+  useEffect(() => {
+    const cleanPhone = formData.phone_primary.replace(/\D/g, "");
+    if (cleanPhone.length < 10) {
+      setCustomerRisk(null);
+      return;
+    }
+
+    let cancelled = false;
+    setCheckingRisk(true);
+    const timer = setTimeout(async () => {
+      try {
+        const res = await checkCustomerRiskAction(cleanPhone);
+        if (!cancelled && res.success && res.data) {
+          setCustomerRisk(res.data);
+        }
+      } catch {
+        // ignore
+      } finally {
+        if (!cancelled) setCheckingRisk(false);
+      }
+    }, 450);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [formData.phone_primary]);
 
   useEffect(() => {
     getShippingRatesAction().then((res) => {
@@ -103,6 +190,18 @@ export function CreateOrderForm() {
       setErrorMessage(null);
     }
   };
+
+  // Smart Address & District Assistant
+  const districtsForGov = useMemo(() => {
+    return getDistrictsForGovernorate(formData.governorate);
+  }, [formData.governorate]);
+
+  const misclassificationWarning = useMemo(() => {
+    if (formData.address && formData.governorate) {
+      return detectGovernorateMisclassification(formData.address, formData.governorate);
+    }
+    return null;
+  }, [formData.address, formData.governorate]);
 
   // Financial calculations
   const totalNum = parseFloat(formData.order_total) || 0;
@@ -311,6 +410,20 @@ export function CreateOrderForm() {
         </div>
       )}
 
+      {/* Smart Omnibox Quick Paste */}
+      <SmartOrderPasteBar
+        shippingRates={shippingRates}
+        onOpenBulkModal={() => setIsBulkModalOpen(true)}
+        onApply={handleApplySmartPaste}
+      />
+
+      {/* Bulk Order Paste Modal */}
+      <BulkOrderPasteModal
+        isOpen={isBulkModalOpen}
+        onClose={() => setIsBulkModalOpen(false)}
+        shippingRates={shippingRates}
+      />
+
       {/* Error Alert */}
       {errorMessage && (
         <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 flex items-center gap-3 text-rose-800 text-sm">
@@ -359,9 +472,42 @@ export function CreateOrderForm() {
 
             {/* Primary Phone */}
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                رقم الهاتف الأساسي <span className="text-rose-500">*</span>
-              </label>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-xs font-semibold text-slate-700">
+                  رقم الهاتف الأساسي <span className="text-rose-500">*</span>
+                </label>
+                <div className="flex items-center gap-1.5">
+                  {checkingRisk && (
+                    <span className="text-[10px] text-blue-600 font-medium animate-pulse">فحص السجل...</span>
+                  )}
+                  {customerRisk && customerRisk.isBlacklisted && (
+                    <span className="px-2 py-0.5 bg-rose-600 text-white text-[10px] font-bold rounded-full flex items-center gap-1 shadow-sm">
+                      <ShieldAlert className="w-3 h-3" />
+                      محظور 🚫
+                    </span>
+                  )}
+                  {customerRisk && !customerRisk.isBlacklisted && customerRisk.riskLevel === "high" && (
+                    <span className="px-2 py-0.5 bg-amber-500 text-white text-[10px] font-bold rounded-full flex items-center gap-1 shadow-sm">
+                      <AlertTriangle className="w-3 h-3" />
+                      عالي المخاطر ⚠️
+                    </span>
+                  )}
+                  {customerRisk && customerRisk.riskLevel === "safe" && customerRisk.deliveredOrders >= 2 && (
+                    <span className="px-2 py-0.5 bg-emerald-600 text-white text-[10px] font-bold rounded-full flex items-center gap-1 shadow-sm">
+                      <CheckCircle2 className="w-3 h-3" />
+                      عميل موثوق ⭐
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setIsBlacklistModalOpen(true)}
+                    className="text-[11px] text-slate-400 hover:text-rose-600 font-medium transition-colors cursor-pointer mr-1"
+                    title="فتح سجل القائمة السوداء"
+                  >
+                    القائمة السوداء
+                  </button>
+                </div>
+              </div>
               <div className="relative">
                 <input
                   type="text"
@@ -371,11 +517,83 @@ export function CreateOrderForm() {
                   value={formData.phone_primary}
                   onChange={(e) => handleFieldChange("phone_primary", e.target.value)}
                   placeholder="مثال: 01012345678"
-                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600 focus:bg-white transition-colors text-right"
+                  className={`w-full px-3.5 py-2.5 bg-slate-50 border rounded-xl text-slate-900 text-sm focus:outline-none focus:ring-2 focus:bg-white transition-colors text-right ${
+                    customerRisk?.isBlacklisted
+                      ? "border-rose-500 focus:ring-rose-500 bg-rose-50/20"
+                      : customerRisk?.riskLevel === "high"
+                      ? "border-amber-400 focus:ring-amber-500 bg-amber-50/20"
+                      : "border-slate-300 focus:ring-blue-600"
+                  }`}
                   dir="ltr"
                 />
               </div>
               <p className="text-[11px] text-slate-400 mt-1">يتم حفظ الصفر في بداية الرقم تلقائياً كنص</p>
+
+              {/* Dynamic Customer Risk Advisory Banner */}
+              {customerRisk && customerRisk.isBlacklisted && (
+                <div className="mt-2.5 p-3 rounded-xl bg-rose-950 text-white border border-rose-500/50 shadow-md space-y-1.5 animate-in fade-in duration-200">
+                  <div className="flex items-center justify-between text-xs font-black text-rose-300">
+                    <span className="flex items-center gap-1.5">
+                      <ShieldAlert className="w-4 h-4 text-rose-400" />
+                      عميل مدرج بالقائمة السوداء
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setIsBlacklistModalOpen(true)}
+                      className="text-[11px] text-rose-200 underline hover:text-white cursor-pointer"
+                    >
+                      إدارة الحظر
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-rose-200 leading-relaxed">
+                    {customerRisk.blacklistReason}
+                  </p>
+                  <div className="text-[11px] font-bold text-amber-300 bg-black/40 px-2.5 py-1.5 rounded-lg border border-rose-500/20">
+                    {customerRisk.recommendationTextAr}
+                  </div>
+                </div>
+              )}
+
+              {customerRisk && !customerRisk.isBlacklisted && customerRisk.riskLevel === "high" && (
+                <div className="mt-2.5 p-3 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 shadow-sm space-y-1.5 animate-in fade-in duration-200">
+                  <div className="flex items-center justify-between text-xs font-bold text-amber-900">
+                    <span className="flex items-center gap-1.5">
+                      <AlertTriangle className="w-4 h-4 text-amber-600" />
+                      عميل عالي المخاطر (سوابق ارتجاع)
+                    </span>
+                    <span className="text-[11px] font-mono bg-amber-200 px-2 py-0.5 rounded-md font-bold">
+                      ارتجاع: {customerRisk.returnRate}% ({customerRisk.returnedOrders} من {customerRisk.totalOrders})
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-amber-800 leading-relaxed">
+                    تسبب هذا العميل في هدر مصاريف شحن سابقة بلغت <strong className="font-mono text-rose-700">{formatEgp(customerRisk.totalPenaltyLossCaused)}</strong> بسبب رفض الاستلام.
+                  </p>
+                  <div className="text-[11px] font-bold text-amber-950 bg-white/80 px-2.5 py-1.5 rounded-lg border border-amber-200">
+                    {customerRisk.recommendationTextAr}
+                  </div>
+                </div>
+              )}
+
+              {customerRisk && !customerRisk.isBlacklisted && customerRisk.riskLevel === "medium" && (
+                <div className="mt-2 p-2.5 rounded-xl bg-blue-50 border border-blue-200 text-blue-900 flex items-center justify-between text-xs animate-in fade-in">
+                  <div className="flex items-center gap-1.5">
+                    <AlertTriangle className="w-3.5 h-3.5 text-blue-600 flex-shrink-0" />
+                    <span className="text-[11px]">{customerRisk.recommendationTextAr}</span>
+                  </div>
+                </div>
+              )}
+
+              {customerRisk && !customerRisk.isBlacklisted && customerRisk.riskLevel === "safe" && customerRisk.deliveredOrders >= 2 && (
+                <div className="mt-2 p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 flex items-center justify-between text-xs animate-in fade-in">
+                  <div className="flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
+                    <span className="text-[11px] font-medium">{customerRisk.recommendationTextAr}</span>
+                  </div>
+                  <span className="text-[10px] font-bold bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded">
+                    {customerRisk.deliveredOrders} أوردر ناجح
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Secondary Phone */}
@@ -424,10 +642,33 @@ export function CreateOrderForm() {
                   </option>
                 ))}
               </datalist>
+
+              {/* District Suggestion Chips */}
+              {districtsForGov.length > 0 && (
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  <span className="text-[10px] text-slate-400 font-semibold">مراكز مقترحة:</span>
+                  {districtsForGov.slice(0, 6).map((dist) => (
+                    <button
+                      key={dist}
+                      type="button"
+                      onClick={() => {
+                        if (!formData.address.includes(dist)) {
+                          const newAddr = formData.address ? `${dist} - ${formData.address}` : dist;
+                          handleFieldChange("address", newAddr);
+                        }
+                      }}
+                      className="text-[11px] px-2 py-0.5 rounded-lg bg-slate-100 hover:bg-blue-50 hover:text-blue-700 text-slate-600 border border-slate-200 transition-colors"
+                      title={`إضافة ${dist} للعنوان`}
+                    >
+                      + {dist}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Detailed Address */}
-            <div className="md:col-span-2">
+            <div className="md:col-span-2 space-y-2">
               <label className="block text-xs font-semibold text-slate-700 mb-1.5">
                 العنوان بالتفصيل <span className="text-rose-500">*</span>
               </label>
@@ -440,6 +681,30 @@ export function CreateOrderForm() {
                 placeholder="اسم الشارع، رقم العقار، الدور، الشقة"
                 className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600 focus:bg-white transition-colors resize-none"
               />
+
+              {/* Misclassification Warning Banner */}
+              {misclassificationWarning && (
+                <div className="p-3 bg-amber-50/90 border border-amber-300 rounded-xl flex items-start justify-between gap-3 text-xs text-amber-950 animate-in fade-in">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-bold block">
+                        تنبيه توجيه شركات الشحن: &quot;{misclassificationWarning.district}&quot; تتبع محافظة &quot;{misclassificationWarning.correctGov}&quot; وليس &quot;{misclassificationWarning.originalGov}&quot;.
+                      </span>
+                      <span className="text-[11px] text-amber-800 leading-relaxed block mt-0.5">
+                        {misclassificationWarning.reason}
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleGovernorateChange(misclassificationWarning.correctGov)}
+                    className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-lg text-xs shrink-0 shadow-sm transition-colors cursor-pointer"
+                  >
+                    تصحيح إلى {misclassificationWarning.correctGov}
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Landmark */}
@@ -642,6 +907,46 @@ export function CreateOrderForm() {
             </span>
           </div>
 
+          {/* Quick Tag Selector Chips */}
+          <div className="space-y-2 pt-1">
+            <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+              <Tag className="w-3.5 h-3.5 text-indigo-600" />
+              <span>وسوم وتعليمات شائعة للبوليصة (انقر للتحديد):</span>
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {PRESET_TAGS.map((tag) => {
+                const activeTags = extractTagsFromNotes(formData.important_notes);
+                const isSelected = activeTags.includes(tag.id);
+                return (
+                  <button
+                    key={tag.id}
+                    type="button"
+                    onClick={() => {
+                      const currentActive = extractTagsFromNotes(formData.important_notes);
+                      const newTagIds = isSelected
+                        ? currentActive.filter((id) => id !== tag.id)
+                        : [...currentActive, tag.id];
+                      const newNotes = embedTagsInNotes(formData.important_notes, newTagIds);
+                      handleFieldChange("important_notes", newNotes);
+                    }}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-all flex items-center gap-1.5 cursor-pointer ${
+                      isSelected
+                        ? `${tag.bgClass} ${tag.textClass} ${tag.borderClass} ring-2 ring-indigo-500/20 shadow-sm`
+                        : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100"
+                    }`}
+                  >
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${
+                        isSelected ? "bg-indigo-600" : "bg-slate-300"
+                      }`}
+                    />
+                    <span>{tag.name}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           <div>
             <textarea
               rows={2}
@@ -775,6 +1080,14 @@ export function CreateOrderForm() {
           </div>
         </div>
       )}
+
+      {/* Customer Blacklist Modal */}
+      <CustomerBlacklistModal
+        isOpen={isBlacklistModalOpen}
+        onClose={() => setIsBlacklistModalOpen(false)}
+        initialPhoneToAdd={formData.phone_primary}
+        initialNameToAdd={formData.customer_name}
+      />
     </div>
   );
 }

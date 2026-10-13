@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabase/server";
 import { calculateCod, calculateNetProfit, derivePaymentStatus } from "@/lib/calculations";
 import { normalizePhoneNumber } from "@/lib/excel-import";
 import { Order, OrderInsert, OrderUpdate, PrintStatus, DeliveryStatus, SettlementStatus, PaymentStatus } from "@/types/database";
+import { recordOrderAuditAction, recordBatchOrderAuditAction } from "@/app/actions/audit";
 
 export interface CreateOrderInput {
   customer_name: string;
@@ -264,6 +265,23 @@ export async function createOrderAction(
       };
     }
 
+    // Record initial audit event
+    const orderRecord = data as any;
+    if (orderRecord && orderRecord.id) {
+      try {
+        await recordOrderAuditAction(
+          orderRecord.id,
+          "order_created",
+          "إنشاء وتسجيل الأوردر",
+          `تم تسجيل الأوردر بنجاح للعميل (${customerName}) بمبلغ إجمالي ${orderTotal} ج.م ومطلوب تحصيل ${codAmount} ج.م.`,
+          "التاجر",
+          { order_total: orderTotal, cod_amount: codAmount, governorate }
+        );
+      } catch {
+        // ignore background audit errors
+      }
+    }
+
     return {
       success: true,
       data: data as Order,
@@ -384,6 +402,29 @@ export async function updateOrderAction(
 
     if (error) {
       return { success: false, error: "فشل في تحديث الأوردر: " + error.message };
+    }
+
+    if (data && updates.delivery_status) {
+      try {
+        const statusAr =
+          updates.delivery_status === "handed_to_carrier"
+            ? "مع المندوب"
+            : updates.delivery_status === "delivered"
+            ? "تم التوصيل بنجاح"
+            : updates.delivery_status === "returned"
+            ? "مرتجع"
+            : "جديد";
+        await recordOrderAuditAction(
+          orderId,
+          "status_changed",
+          `تغيير حالة الشحنة إلى (${statusAr})`,
+          `تم تحديث حالة الشحنة يدوياً بواسطة التاجر إلى "${statusAr}".`,
+          "التاجر",
+          { new_status: updates.delivery_status }
+        );
+      } catch {
+        // ignore background audit errors
+      }
     }
 
     return { success: true, data: data as Order };
@@ -654,6 +695,75 @@ export async function batchUpdateDeliveryStatusAction(
   }
 }
 
+export async function batchHandoverToCarrierAction(
+  orderIds: string[],
+  carrierName?: string
+): Promise<ActionResult<{ updatedCount: number }>> {
+  try {
+    const supabase = await createClient();
+
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+
+    if (userError || !user) {
+      return { success: false, error: "انتهت جلستك، يرجى تسجيل الدخول مجدداً" };
+    }
+
+    if (!Array.isArray(orderIds) || orderIds.length === 0) {
+      return { success: false, error: "لم يتم تحديد أي أوردرات للتسليم" };
+    }
+
+    const now = new Date().toISOString();
+    const payload: Record<string, unknown> = {
+      delivery_status: "handed_to_carrier",
+      print_status: "printed",
+      printed_at: now,
+      updated_at: now,
+    };
+
+    const { error, count } = await (supabase
+      .from("orders") as any)
+      .update(payload)
+      .in("id", orderIds);
+
+    if (error) {
+      return { success: false, error: "فشل تسليم الشحنات لشركة الشحن: " + error.message };
+    }
+
+    // Record audit trail event for handed over orders
+    try {
+      await recordBatchOrderAuditAction(
+        orderIds,
+        "handed_to_carrier",
+        "تسليم الشحنة لمندوب الشحن",
+        `تم تسليم الشحنة بموجب مانيفست تسليم رسمي إلى: ${carrierName || "مندوب شركة الشحن"}`,
+        user.email || "التاجر",
+        {
+          carrier: carrierName || "مندوب شركة الشحن",
+          handover_time: now,
+          batch_size: orderIds.length,
+        }
+      );
+    } catch {
+      // Continue silently if audit log fails
+    }
+
+    revalidatePath("/print/queue");
+    revalidatePath("/print/archive");
+    revalidatePath("/orders");
+    revalidatePath("/dashboard");
+    revalidatePath("/finance");
+    revalidatePath("/settlements");
+
+    return { success: true, data: { updatedCount: count || orderIds.length } };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "خطأ غير متوقع";
+    return { success: false, error: "تعذر إتمام تسليم الشحنات: " + msg };
+  }
+}
+
 export async function deleteOrderAction(
   orderId: string
 ): Promise<ActionResult<{ id: string }>> {
@@ -863,3 +973,227 @@ export async function checkExistingPhoneDuplicatesAction(
     return { success: false, error: msg };
   }
 }
+
+export async function applySettlementReconciliationAction(
+  orderIds: string[],
+  options?: {
+    markAsDelivered?: boolean;
+    settlementNotes?: string;
+  }
+): Promise<ActionResult<{ updatedCount: number }>> {
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+
+    if (userError || !user) {
+      return { success: false, error: "انتهت جلستك، يرجى تسجيل الدخول مجدداً" };
+    }
+
+    if (!Array.isArray(orderIds) || orderIds.length === 0) {
+      return { success: false, error: "لم يتم تحديد أي أوردرات للتسوية" };
+    }
+
+    const payload: Record<string, unknown> = {
+      settlement_status: "settled",
+      settled_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    if (options?.markAsDelivered !== false) {
+      payload.delivery_status = "delivered";
+    }
+
+    const { error, count } = await (supabase
+      .from("orders") as any)
+      .update(payload)
+      .in("id", orderIds);
+
+    if (error) {
+      return { success: false, error: "فشل اعتماد التسوية للأوردرات: " + error.message };
+    }
+
+    return { success: true, data: { updatedCount: count || orderIds.length } };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "خطأ غير متوقع";
+    return { success: false, error: "تعذر تطبيق التسوية: " + msg };
+  }
+}
+
+export async function markOrderReturnReceivedAction(
+  orderIds: string[] | string
+): Promise<ActionResult<{ updatedCount: number }>> {
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+
+    if (userError || !user) {
+      return { success: false, error: "انتهت جلستك، يرجى تسجيل الدخول مجدداً" };
+    }
+
+    const ids = Array.isArray(orderIds) ? orderIds : [orderIds];
+    if (ids.length === 0) {
+      return { success: false, error: "لم يتم تحديد أوردرات" };
+    }
+
+    // Fetch existing notes to append the tag cleanly
+    const { data: existingOrders, error: fetchErr } = await (supabase
+      .from("orders") as any)
+      .select("id, important_notes")
+      .in("id", ids);
+
+    if (fetchErr) {
+      return { success: false, error: "فشل استرجاع بيانات الأوردرات: " + fetchErr.message };
+    }
+
+    const { buildPhysicalReturnReceivedNote } = await import("@/lib/returnsManager");
+
+    let updatedCount = 0;
+    for (const order of existingOrders || []) {
+      const updatedNotes = buildPhysicalReturnReceivedNote(order.important_notes);
+      const { error: updateErr } = await (supabase
+        .from("orders") as any)
+        .update({
+          delivery_status: "returned",
+          important_notes: updatedNotes,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", order.id);
+
+      if (!updateErr) updatedCount++;
+    }
+
+    revalidatePath("/orders");
+    revalidatePath("/settlements");
+
+    return { success: true, data: { updatedCount } };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "خطأ غير متوقع";
+    return { success: false, error: "فشل تأكيد استلام المرتجع: " + msg };
+  }
+}
+
+export async function markOrderReturnDisputedAction(
+  orderId: string,
+  claimReason?: string
+): Promise<ActionResult<boolean>> {
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+
+    if (userError || !user) {
+      return { success: false, error: "انتهت جلستك، يرجى تسجيل الدخول مجدداً" };
+    }
+
+    const { data: order, error: fetchErr } = await (supabase
+      .from("orders") as any)
+      .select("id, important_notes")
+      .eq("id", orderId)
+      .single();
+
+    if (fetchErr || !order) {
+      return { success: false, error: "الأوردر غير موجود" };
+    }
+
+    const { buildDisputedLostNote } = await import("@/lib/returnsManager");
+    const updatedNotes = buildDisputedLostNote(order.important_notes, claimReason);
+
+    const { error: updateErr } = await (supabase
+      .from("orders") as any)
+      .update({
+        delivery_status: "returned",
+        important_notes: updatedNotes,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", orderId);
+
+    if (updateErr) {
+      return { success: false, error: "فشل تسجيل مطالبة الطرد المفقود: " + updateErr.message };
+    }
+
+    revalidatePath("/orders");
+    revalidatePath("/settlements");
+
+    return { success: true, data: true };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "خطأ غير متوقع";
+    return { success: false, error: "فشل تسجيل المطالبة: " + msg };
+  }
+}
+
+export async function syncCarrierTrackingAction(
+  orderId: string,
+  carrier: "bosta" | "jnt" | "aramex" | "generic",
+  newStatus: DeliveryStatus,
+  statusReason?: string
+): Promise<ActionResult<boolean>> {
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+
+    if (userError || !user) {
+      return { success: false, error: "انتهت جلستك، يرجى تسجيل الدخول مجدداً" };
+    }
+
+    const { data: order, error: fetchErr } = await (supabase
+      .from("orders") as any)
+      .select("id, important_notes")
+      .eq("id", orderId)
+      .single();
+
+    if (fetchErr || !order) {
+      return { success: false, error: "الأوردر غير موجود" };
+    }
+
+    const { buildCarrierTrackingNote } = await import("@/lib/carriers/webhookProcessor");
+    const statusLabel =
+      newStatus === "delivered"
+        ? "تم التسليم"
+        : newStatus === "returned"
+        ? "مرتجع"
+        : "مع المندوب للتوصيل";
+
+    const updatedNotes = buildCarrierTrackingNote(
+      order.important_notes,
+      carrier,
+      statusLabel,
+      statusReason
+    );
+
+    const { error: updateErr } = await (supabase
+      .from("orders") as any)
+      .update({
+        delivery_status: newStatus,
+        important_notes: updatedNotes,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", orderId);
+
+    if (updateErr) {
+      return { success: false, error: "فشل تحديث حالة الشحن: " + updateErr.message };
+    }
+
+    revalidatePath("/orders");
+    revalidatePath("/settlements");
+    revalidatePath(`/track/${orderId}`);
+
+    return { success: true, data: true };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "خطأ غير متوقع";
+    return { success: false, error: msg };
+  }
+}
+
+
+

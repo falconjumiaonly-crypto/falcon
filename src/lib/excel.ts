@@ -261,3 +261,279 @@ export function generateCarrierSettlementExcelBuffer(
   const buf = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
   return new Uint8Array(buf);
 }
+
+export type CarrierType =
+  | "bosta"
+  | "jt"
+  | "aramex"
+  | "mylerz"
+  | "standard"
+  | "carrier_settlement";
+
+export interface CarrierTemplateInfo {
+  id: CarrierType;
+  name: string;
+  nameAr: string;
+  description: string;
+  filePrefix: string;
+  sheetName: string;
+  badgeColor: string;
+}
+
+export const CARRIER_TEMPLATES: Record<CarrierType, CarrierTemplateInfo> = {
+  bosta: {
+    id: "bosta",
+    name: "Bosta",
+    nameAr: "بوسطة (Bosta)",
+    description: "قالب رفع الشحنات الجماعي المعتمد لشركة بوسطة مع مبالغ COD والعناوين وتصريح فتح الشحنة",
+    filePrefix: "Bosta_Shipments",
+    sheetName: "شحنات بوسطة",
+    badgeColor: "rose",
+  },
+  jt: {
+    id: "jt",
+    name: "J&T Express",
+    nameAr: "جي آند تي (J&T Express)",
+    description: "نموذج كشف شحنات جي آند تي إكسبريس المتوافق مع بوابة العملاء الرسمية",
+    filePrefix: "JT_Express_Shipments",
+    sheetName: "شحنات J&T",
+    badgeColor: "red",
+  },
+  aramex: {
+    id: "aramex",
+    name: "Aramex",
+    nameAr: "أرامكس (Aramex)",
+    description: "تنسيق أرامكس المعتمد للشحن الداخلي والتحصيل عند الاستلام في مصر",
+    filePrefix: "Aramex_Shipments",
+    sheetName: "شحنات أرامكس",
+    badgeColor: "orange",
+  },
+  mylerz: {
+    id: "mylerz",
+    name: "Mylerz",
+    nameAr: "مايلرز (Mylerz)",
+    description: "قالب استيراد كشف الشحنات لبوابة تجار مايلرز للتحصيل السريع",
+    filePrefix: "Mylerz_Shipments",
+    sheetName: "شحنات مايلرز",
+    badgeColor: "indigo",
+  },
+  standard: {
+    id: "standard",
+    name: "Falcon Standard",
+    nameAr: "النموذج القياسي لفلكون",
+    description: "التقرير الشامل لكافة بيانات الأوردرات والأرباح وحالات الدفع والطباعة",
+    filePrefix: "Falcon_Orders",
+    sheetName: "الطلبات",
+    badgeColor: "emerald",
+  },
+  carrier_settlement: {
+    id: "carrier_settlement",
+    name: "Carrier Settlement",
+    nameAr: "كشف مطابقة مستحقات الشحن",
+    description: "كشف الأوردرات المسلمة المعلقة لمطابقة الكاش المحصل مع شركة الشحن",
+    filePrefix: "Falcon_Carrier_Settlements",
+    sheetName: "مستحقات الشحن المعلقة",
+    badgeColor: "blue",
+  },
+};
+
+export interface CarrierExportOptions {
+  allowOpenPackage?: boolean;
+  defaultPackageDescription?: string;
+}
+
+/**
+ * Generates an Excel buffer formatted specifically for 3rd-party carrier bulk uploads:
+ * Bosta, J&T Express, Aramex, Mylerz, or Falcon Standard.
+ */
+export function generateCarrierOrdersExcelBuffer(
+  orders: Order[],
+  carrier: CarrierType = "standard",
+  options?: CarrierExportOptions
+): Uint8Array {
+  if (carrier === "standard") {
+    return generateOrdersExcelBuffer(orders, CARRIER_TEMPLATES.standard.sheetName);
+  }
+
+  if (carrier === "carrier_settlement") {
+    return generateCarrierSettlementExcelBuffer(orders);
+  }
+
+  let headers: string[] = [];
+  let rowsData: (string | number)[][] = [];
+  let colWidths: { wch: number }[] = [];
+  let phoneColIndices: number[] = [];
+  const sheetName = CARRIER_TEMPLATES[carrier].sheetName;
+
+  if (carrier === "bosta") {
+    headers = [
+      "اسم المستلم",
+      "رقم الهاتف",
+      "رقم إضافي",
+      "المحافظة / المدينة",
+      "العنوان بالتفصيل",
+      "علامة مميزة",
+      "مبلغ التحصيل (COD)",
+      "رقم الأوردر (المرجع)",
+      "ملاحظات الشحنة",
+      "محتوى الشحنة",
+      "السماح بفتح الشحنة",
+    ];
+    phoneColIndices = [1, 2];
+    colWidths = [
+      { wch: 22 },
+      { wch: 16 },
+      { wch: 16 },
+      { wch: 16 },
+      { wch: 35 },
+      { wch: 18 },
+      { wch: 16 },
+      { wch: 18 },
+      { wch: 28 },
+      { wch: 22 },
+      { wch: 16 },
+    ];
+
+    rowsData = orders.map((o) => [
+      o.customer_name || "",
+      o.phone_primary ? String(o.phone_primary) : "",
+      o.phone_secondary ? String(o.phone_secondary) : "",
+      o.governorate || "",
+      o.address || "",
+      o.landmark || "",
+      Number(o.cod_amount) || 0,
+      o.id.slice(0, 8).toUpperCase(),
+      o.important_notes || "",
+      options?.defaultPackageDescription || "بضائع عامة / ملابس",
+      options?.allowOpenPackage !== false ? "نعم" : "لا",
+    ]);
+  } else if (carrier === "jt") {
+    headers = [
+      "Customer Order No (رقم الطلب)",
+      "Consignee Name (اسم المستلم)",
+      "Consignee Phone (رقم الهاتف)",
+      "Consignee Backup Phone (هاتف بديل)",
+      "Destination Province (المحافظة)",
+      "Destination Address (العنوان التفصيلي)",
+      "COD Amount (مبلغ التحصيل)",
+      "Goods Description (محتوى الشحنة)",
+      "Remarks (ملاحظات التوصيل)",
+    ];
+    phoneColIndices = [2, 3];
+    colWidths = [
+      { wch: 20 },
+      { wch: 22 },
+      { wch: 16 },
+      { wch: 16 },
+      { wch: 16 },
+      { wch: 35 },
+      { wch: 16 },
+      { wch: 24 },
+      { wch: 28 },
+    ];
+
+    rowsData = orders.map((o) => [
+      o.id.slice(0, 8).toUpperCase(),
+      o.customer_name || "",
+      o.phone_primary ? String(o.phone_primary) : "",
+      o.phone_secondary ? String(o.phone_secondary) : "",
+      o.governorate || "",
+      o.address || "",
+      Number(o.cod_amount) || 0,
+      options?.defaultPackageDescription || o.important_notes || "شحنة تجارة إلكترونية",
+      o.landmark ? `علامة مميزة: ${o.landmark}` : o.important_notes || "",
+    ]);
+  } else if (carrier === "aramex") {
+    headers = [
+      "Reference 1 (رقم المرجع)",
+      "Recipient Name (اسم المستلم)",
+      "Recipient Phone 1 (رقم الهاتف)",
+      "Recipient Phone 2 (رقم إضافي)",
+      "Recipient City (المدينة)",
+      "Recipient Address 1 (العنوان بالتفصيل)",
+      "COD Amount (قيمة التحصيل)",
+      "Special Instructions (تعليمات خاصة)",
+      "Goods Description (الوصف)",
+    ];
+    phoneColIndices = [2, 3];
+    colWidths = [
+      { wch: 20 },
+      { wch: 22 },
+      { wch: 16 },
+      { wch: 16 },
+      { wch: 16 },
+      { wch: 35 },
+      { wch: 16 },
+      { wch: 28 },
+      { wch: 22 },
+    ];
+
+    rowsData = orders.map((o) => [
+      o.id.slice(0, 8).toUpperCase(),
+      o.customer_name || "",
+      o.phone_primary ? String(o.phone_primary) : "",
+      o.phone_secondary ? String(o.phone_secondary) : "",
+      o.governorate || "",
+      o.address || "",
+      Number(o.cod_amount) || 0,
+      o.important_notes || "",
+      options?.defaultPackageDescription || "منتجات تجزئة",
+    ]);
+  } else if (carrier === "mylerz") {
+    headers = [
+      "Merchant Reference (مرجع التاجر)",
+      "Customer Name (اسم العميل)",
+      "Mobile No (الموبايل)",
+      "Alternate Mobile (موبايل آخر)",
+      "City / Area (المنطقة / المحافظة)",
+      "Street Address (العنوان بالشارع)",
+      "COD Value (قيمة التحصيل)",
+      "Description (الوصف والملاحظات)",
+    ];
+    phoneColIndices = [2, 3];
+    colWidths = [
+      { wch: 20 },
+      { wch: 22 },
+      { wch: 16 },
+      { wch: 16 },
+      { wch: 16 },
+      { wch: 35 },
+      { wch: 16 },
+      { wch: 30 },
+    ];
+
+    rowsData = orders.map((o) => [
+      o.id.slice(0, 8).toUpperCase(),
+      o.customer_name || "",
+      o.phone_primary ? String(o.phone_primary) : "",
+      o.phone_secondary ? String(o.phone_secondary) : "",
+      o.governorate || "",
+      o.address || "",
+      Number(o.cod_amount) || 0,
+      [o.important_notes, o.landmark].filter(Boolean).join(" - ") ||
+        options?.defaultPackageDescription ||
+        "طلب شحن",
+    ]);
+  }
+
+  const worksheet = XLSX.utils.aoa_to_sheet([headers, ...rowsData]);
+
+  // Ensure phone columns retain string type with leading zeros
+  for (let R = 1; R <= rowsData.length; ++R) {
+    phoneColIndices.forEach((colIdx) => {
+      const cellRef = XLSX.utils.encode_cell({ r: R, c: colIdx });
+      if (worksheet[cellRef]) {
+        worksheet[cellRef].t = "s";
+        worksheet[cellRef].v = String(worksheet[cellRef].v);
+      }
+    });
+  }
+
+  worksheet["!cols"] = colWidths;
+
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+
+  const buf = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+  return new Uint8Array(buf);
+}

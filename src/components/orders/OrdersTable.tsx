@@ -17,17 +17,48 @@ import {
   AlertCircle,
   Loader2,
   RefreshCw,
-  Eye,
-  PlusCircle,
   CheckCircle2,
   Trash2,
+  Layers,
+  PlusCircle,
+  Truck,
+  Barcode,
+  MessageSquare,
+  PackageCheck,
+  RotateCcw,
+  ShieldAlert,
+  UserX,
+  Tag,
+  History,
+  FileText,
+  Sparkles,
 } from "lucide-react";
 import { Order, PrintStatus, DeliveryStatus, SettlementStatus, PaymentStatus } from "@/types/database";
 import { formatEgp, getPaymentStatusBadge } from "@/lib/calculations";
+import { DEFAULT_GOVERNORATES } from "@/lib/governorates";
+import {
+  OrderTag,
+  PRESET_TAGS,
+  getOrderTags,
+  filterOrdersByTag,
+} from "@/lib/tags/tagsEngine";
+import { getOrderTagsMapAction, getCustomTagsAction } from "@/app/actions/tags";
+import { BulkOrderPasteModal } from "./BulkOrderPasteModal";
+import { CarrierExportModal } from "./CarrierExportModal";
+import { DispatchTrackerCards } from "./DispatchTrackerCards";
+import { BarcodeHandoverScannerModal } from "./BarcodeHandoverScannerModal";
+import { WhatsAppNotificationModal } from "./WhatsAppNotificationModal";
+import { CustomerBlacklistModal } from "@/components/risk/CustomerBlacklistModal";
+import { OrderTagsModal } from "@/components/tags/OrderTagsModal";
+import { OrderTimelineModal } from "@/components/orders/OrderTimelineModal";
+import { CourierManifestModal } from "@/components/printing/CourierManifestModal";
+import { SmartCarrierRoutingModal } from "@/components/orders/SmartCarrierRoutingModal";
 import {
   getOrdersAction,
   updateOrderAction,
   batchUpdatePrintStatusAction,
+  batchUpdateDeliveryStatusAction,
+  batchHandoverToCarrierAction,
   deleteOrderAction,
   batchDeleteOrdersAction,
 } from "@/app/actions/orders";
@@ -78,11 +109,48 @@ export function OrdersTable({
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [isBulkDeleting, setIsBulkDeleting] = useState(false);
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
+  const [isBulkModalOpen, setIsBulkModalOpen] = useState(false);
+  const [isCarrierExportOpen, setIsCarrierExportOpen] = useState(false);
+  const [isScannerOpen, setIsScannerOpen] = useState(false);
+  const [isWhatsAppModalOpen, setIsWhatsAppModalOpen] = useState(false);
+  const [whatsAppOrders, setWhatsAppOrders] = useState<Order[]>([]);
+  const [isBlacklistModalOpen, setIsBlacklistModalOpen] = useState(false);
+  const [blacklistTarget, setBlacklistTarget] = useState<{ phone: string; name: string } | null>(null);
+  const [isManifestModalOpen, setIsManifestModalOpen] = useState(false);
+
+  // Order Tags & Lifecycle Labels State
+  const [tagFilter, setTagFilter] = useState("all");
+  const [tagsMap, setTagsMap] = useState<Record<string, string[]>>({});
+  const [customTags, setCustomTags] = useState<OrderTag[]>([]);
+  const [isTagsModalOpen, setIsTagsModalOpen] = useState(false);
+  const [singleTagTargetOrderId, setSingleTagTargetOrderId] = useState<string | undefined>(undefined);
+  const [singleTagInitialIds, setSingleTagInitialIds] = useState<string[]>([]);
+  const [batchTagTargetIds, setBatchTagTargetIds] = useState<string[]>([]);
+  const [timelineOrderId, setTimelineOrderId] = useState<string | null>(null);
+  const [isSmartRoutingOpen, setIsSmartRoutingOpen] = useState(false);
+
+  const loadTags = useCallback(async () => {
+    try {
+      const [mapRes, customRes] = await Promise.all([
+        getOrderTagsMapAction(),
+        getCustomTagsAction(),
+      ]);
+      if (mapRes.success && mapRes.data) setTagsMap(mapRes.data);
+      if (customRes.success && customRes.data) setCustomTags(customRes.data);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    loadTags();
+  }, [loadTags]);
 
   // Fetch orders from server action
   const loadOrders = useCallback(async () => {
     setLoading(true);
     try {
+      loadTags();
       const res = await getOrdersAction({
         page: currentPage,
         pageSize,
@@ -105,7 +173,7 @@ export function OrdersTable({
     } finally {
       setLoading(false);
     }
-  }, [currentPage, pageSize, search, printStatus, deliveryStatus, settlementStatus, paymentStatus, startDate, endDate]);
+  }, [currentPage, pageSize, search, printStatus, deliveryStatus, settlementStatus, paymentStatus, startDate, endDate, loadTags]);
 
   useEffect(() => {
     loadOrders();
@@ -230,6 +298,46 @@ export function OrdersTable({
     });
   };
 
+  // Bulk update delivery status (e.g. handed to courier)
+  const handleBulkUpdateDeliveryStatus = (status: DeliveryStatus) => {
+    if (selectedIds.length === 0) return;
+    startTransition(async () => {
+      const res = await batchUpdateDeliveryStatusAction(selectedIds, status);
+      if (res.success) {
+        setSelectedIds([]);
+        loadOrders();
+      }
+    });
+  };
+
+  // Bulk mark returns as physically received in warehouse
+  const handleBulkMarkReturnReceived = () => {
+    if (selectedIds.length === 0) return;
+    startTransition(async () => {
+      const { markOrderReturnReceivedAction } = await import("@/app/actions/orders");
+      const res = await markOrderReturnReceivedAction(selectedIds);
+      if (res.success) {
+        setSelectedIds([]);
+        loadOrders();
+      }
+    });
+  };
+
+  // Handover selected orders to carrier via manifest sheet
+  const handleManifestHandover = async (orderIds: string[], carrierName: string) => {
+    try {
+      const res = await batchHandoverToCarrierAction(orderIds, carrierName);
+      if (res.success) {
+        setSelectedIds([]);
+        loadOrders();
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  };
+
   // Delete Order Single
   const handleDeleteOrder = async () => {
     if (!deletingOrder) return;
@@ -293,49 +401,46 @@ export function OrdersTable({
             <span>تحديث</span>
           </button>
 
-          {/* Export Dropdown */}
-          <div className="relative group">
-            <button
-              disabled={isExporting}
-              className="h-10 px-4 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl flex items-center gap-2 shadow-sm shadow-emerald-600/20 transition-colors"
-            >
-              {isExporting ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <Download className="w-4 h-4" />
-              )}
-              <span>تصدير Excel</span>
-            </button>
+          {/* Barcode Handover Scanner Launch Button */}
+          <button
+            onClick={() => setIsScannerOpen(true)}
+            className="h-10 px-4 bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-sm shadow-amber-500/20 transition-colors cursor-pointer"
+            title="مسح سريع لباركود الشحنات وتسليمها للمندوب"
+          >
+            <Barcode className="w-4 h-4" />
+            <span>الماسح السريع للتسليم</span>
+          </button>
 
-            <div className="absolute left-0 mt-1 w-48 bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 z-20 hidden group-hover:block transition-all">
-              {selectedIds.length > 0 && (
-                <button
-                  onClick={() => handleExportExcel("selected")}
-                  className="w-full text-right px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 flex items-center justify-between"
-                >
-                  <span>الصفوف المحددة فقط</span>
-                  <span className="bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded text-[10px] font-bold">
-                    {selectedIds.length}
-                  </span>
-                </button>
-              )}
-              <button
-                onClick={() => handleExportExcel("filtered")}
-                className="w-full text-right px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 flex items-center justify-between"
-              >
-                <span>النتائج الحالية المطابقة</span>
-                <span className="bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded text-[10px]">
-                  {totalOrders}
-                </span>
-              </button>
-              <button
-                onClick={() => handleExportExcel("all")}
-                className="w-full text-right px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
-              >
-                <span>كل البيانات المصرح بها</span>
-              </button>
-            </div>
-          </div>
+          {/* Export to Carriers Button */}
+          <button
+            onClick={() => setIsCarrierExportOpen(true)}
+            className="h-10 px-4 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl flex items-center gap-2 shadow-sm shadow-emerald-600/20 transition-colors cursor-pointer"
+            title="تصدير كشوف الشحن متوافقة مع بوسطة، جي آند تي، أرامكس، مايلرز أو النموذج الشامل"
+          >
+            <Truck className="w-4 h-4" />
+            <span>تصدير لشركات الشحن</span>
+          </button>
+
+          <button
+            onClick={() => setIsBulkModalOpen(true)}
+            className="h-10 px-3.5 bg-gradient-to-r from-indigo-50 to-blue-50 hover:from-indigo-100 hover:to-blue-100 text-indigo-700 border border-indigo-200/80 text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-sm transition-all"
+            title="لصق عدة أوردرات معاً دفعة واحدة"
+          >
+            <Layers className="w-4 h-4 text-indigo-600" />
+            <span>+ لصق مجمع</span>
+          </button>
+
+          <button
+            onClick={() => {
+              setBlacklistTarget(null);
+              setIsBlacklistModalOpen(true);
+            }}
+            className="h-10 px-3.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-sm transition-all cursor-pointer"
+            title="إدارة القائمة السوداء والعملاء المحظورين لتفادي خسائر الشحن"
+          >
+            <ShieldAlert className="w-4 h-4 text-rose-600" />
+            <span>القائمة السوداء</span>
+          </button>
 
           <Link
             href="/orders/create"
@@ -346,6 +451,17 @@ export function OrdersTable({
           </Link>
         </div>
       </div>
+
+      {/* In-Warehouse vs Dispatched Tracker Cards */}
+      <DispatchTrackerCards
+        orders={orders}
+        activeDeliveryStatus={deliveryStatus}
+        onSelectDeliveryStatus={(st) => {
+          setDeliveryStatus(st);
+          setCurrentPage(1);
+        }}
+        onOpenScanner={() => setIsScannerOpen(true)}
+      />
 
       {/* Filter and Search Bar */}
       <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
@@ -430,6 +546,25 @@ export function OrdersTable({
               <option value="settled">تمت التسوية</option>
             </select>
           </div>
+
+          {/* Order Tag Filter */}
+          <div>
+            <select
+              value={tagFilter}
+              onChange={(e) => {
+                setTagFilter(e.target.value);
+                setCurrentPage(1);
+              }}
+              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-600"
+            >
+              <option value="all">كل الوسوم والتصنيفات</option>
+              {[...PRESET_TAGS, ...customTags].map((t) => (
+                <option key={t.id} value={t.id}>
+                  🏷️ {t.name}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
         {/* Date Range Row */}
@@ -459,7 +594,7 @@ export function OrdersTable({
               className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs"
             />
           </div>
-          {(startDate || endDate || search || printStatus !== initialPrintStatus || deliveryStatus !== "all" || settlementStatus !== "all" || paymentStatus !== "all") && (
+          {(startDate || endDate || search || printStatus !== initialPrintStatus || deliveryStatus !== "all" || settlementStatus !== "all" || paymentStatus !== "all" || tagFilter !== "all") && (
             <button
               onClick={() => {
                 setSearch("");
@@ -467,6 +602,7 @@ export function OrdersTable({
                 setDeliveryStatus("all");
                 setSettlementStatus("all");
                 setPaymentStatus("all");
+                setTagFilter("all");
                 setStartDate("");
                 setEndDate("");
                 setCurrentPage(1);
@@ -499,11 +635,87 @@ export function OrdersTable({
             </button>
 
             <button
+              onClick={() => setIsCarrierExportOpen(true)}
+              className="h-9 px-3.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors shadow-sm"
+            >
+              <Truck className="w-3.5 h-3.5" />
+              <span>تصدير لشركة الشحن ({selectedIds.length})</span>
+            </button>
+
+            <button
+              onClick={() => setIsSmartRoutingOpen(true)}
+              data-webmcp-action="smart-route-carriers"
+              className="h-9 px-3.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
+              title="التوجيه الذكي واختيار أفضل شركة شحن لكل محافظة وتوفير تكاليف المرتجعات"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+              <span>التوجيه الذكي 🎯 ({selectedIds.length})</span>
+            </button>
+
+            <button
+              onClick={() => handleBulkUpdateDeliveryStatus("handed_to_carrier")}
+              disabled={isPending}
+              className="h-9 px-3.5 bg-amber-500 hover:bg-amber-600 text-slate-950 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
+              title="تحديث حالة الأوردرات المحددة إلى: تم التسليم لشركة الشحن"
+            >
+              <Truck className="w-3.5 h-3.5" />
+              <span>تسليم للمندوب ({selectedIds.length})</span>
+            </button>
+
+            <button
+              onClick={handleBulkMarkReturnReceived}
+              disabled={isPending}
+              className="h-9 px-3.5 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
+              title="تأكيد استلام الطرود المرتجعة فعلياً بالمخزن وفحصها"
+            >
+              <PackageCheck className="w-3.5 h-3.5" />
+              <span>استلام مرتجع بالمخزن ({selectedIds.length})</span>
+            </button>
+
+            <button
               onClick={handleSendSelectedToPrintQueue}
+              data-webmcp-action="bulk-print"
               className="h-9 px-3.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors"
             >
               <Printer className="w-3.5 h-3.5" />
               <span>طباعة البوالص المحددة</span>
+            </button>
+
+            <button
+              onClick={() => setIsManifestModalOpen(true)}
+              data-webmcp-action="bulk-manifest"
+              className="h-9 px-3.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer border border-slate-700"
+              title="طباعة كشف وبيان تسليم الشحنات لمندوب الشحن بمقاس A4 وتوقيع الاستلام"
+            >
+              <FileText className="w-3.5 h-3.5 text-blue-400" />
+              <span>مانيفست التسليم A4 ({selectedIds.length})</span>
+            </button>
+
+            <button
+              onClick={() => {
+                setWhatsAppOrders(orders.filter((o) => selectedIds.includes(o.id)));
+                setIsWhatsAppModalOpen(true);
+              }}
+              data-webmcp-action="bulk-whatsapp"
+              className="h-9 px-3.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
+              title="إرسال إشعارات تتبع بالواتساب للأوردرات المحددة"
+            >
+              <MessageSquare className="w-3.5 h-3.5" />
+              <span>إشعار واتساب ({selectedIds.length})</span>
+            </button>
+
+            <button
+              onClick={() => {
+                setBatchTagTargetIds(selectedIds);
+                setSingleTagTargetOrderId(undefined);
+                setSingleTagInitialIds([]);
+                setIsTagsModalOpen(true);
+              }}
+              className="h-9 px-3.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
+              title="إضافة وتعديل وسوم وتصنيفات الشحنات المحددة دفعة واحدة"
+            >
+              <Tag className="w-3.5 h-3.5" />
+              <span>وسم المحدد ({selectedIds.length})</span>
             </button>
 
             <button
@@ -517,6 +729,7 @@ export function OrdersTable({
 
             <button
               onClick={() => setSelectedIds([])}
+              data-webmcp-action="clear-selection"
               className="p-1.5 text-blue-300 hover:text-white rounded-lg hover:bg-blue-800 transition-colors"
               title="إلغاء التحديد"
             >
@@ -535,6 +748,7 @@ export function OrdersTable({
                 <th className="p-3 w-10 text-center">
                   <button
                     onClick={handleToggleSelectAllOnPage}
+                    data-webmcp-action="select-all"
                     className="p-1 text-slate-400 hover:text-slate-600 focus:outline-none"
                     aria-label="تحديد الكل"
                   >
@@ -568,20 +782,21 @@ export function OrdersTable({
                     <span className="mt-2 block">جاري تحميل بيانات الطلبات...</span>
                   </td>
                 </tr>
-              ) : orders.length === 0 ? (
+              ) : filterOrdersByTag(orders, tagFilter, tagsMap).length === 0 ? (
                 <tr>
                   <td colSpan={13} className="p-12 text-center text-slate-400">
                     <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mx-auto text-slate-400 mb-2">
                       <AlertCircle className="w-6 h-6" />
                     </div>
-                    <span className="font-semibold text-slate-700 block">لا توجد طلبات مطابقة</span>
+                    <span className="font-semibold text-slate-700 block">لا توجد طلبات مطابقة للوسم أو الفلتر</span>
                     <span className="text-xs text-slate-400">جرب تغيير كلمات البحث أو خيارات الفلترة</span>
                   </td>
                 </tr>
               ) : (
-                orders.map((order) => {
+                filterOrdersByTag(orders, tagFilter, tagsMap).map((order) => {
                   const isSelected = selectedIds.includes(order.id);
                   const paymentBadge = getPaymentStatusBadge(order.payment_status);
+                  const orderTags = getOrderTags(order, customTags, tagsMap);
 
                   return (
                     <tr
@@ -607,8 +822,20 @@ export function OrdersTable({
                         {order.order_date}
                       </td>
 
-                      <td className="p-3 font-bold text-slate-900 whitespace-nowrap">
-                        {order.customer_name}
+                      <td className="p-3 whitespace-nowrap">
+                        <span className="font-bold text-slate-900 block">{order.customer_name}</span>
+                        {orderTags.length > 0 && (
+                          <div className="flex flex-wrap gap-1 mt-1 max-w-[170px]">
+                            {orderTags.map((tag) => (
+                              <span
+                                key={tag.id}
+                                className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${tag.bgClass} ${tag.textClass} ${tag.borderClass}`}
+                              >
+                                {tag.name}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </td>
 
                       <td className="p-3 font-mono font-semibold text-slate-700 whitespace-nowrap" dir="ltr">
@@ -684,6 +911,52 @@ export function OrdersTable({
                           >
                             <Printer className="w-3.5 h-3.5" />
                           </Link>
+
+                          <button
+                            onClick={() => {
+                              setSingleTagTargetOrderId(order.id);
+                              setSingleTagInitialIds(orderTags.map((t) => t.id));
+                              setBatchTagTargetIds([]);
+                              setIsTagsModalOpen(true);
+                            }}
+                            className="p-1.5 rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+                            title="إدارة وتعديل وسوم هذا الأوردر"
+                          >
+                            <Tag className="w-3.5 h-3.5" />
+                          </button>
+
+                          <button
+                            onClick={() => setTimelineOrderId(order.id)}
+                            className="p-1.5 rounded-lg text-slate-500 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                            title="سجل العمليات وتاريخ الشحنة (Audit Timeline)"
+                          >
+                            <History className="w-3.5 h-3.5" />
+                          </button>
+
+                          <button
+                            onClick={() => {
+                              setWhatsAppOrders([order]);
+                              setIsWhatsAppModalOpen(true);
+                            }}
+                            className="p-1.5 rounded-lg text-slate-500 hover:text-emerald-600 hover:bg-emerald-50 transition-colors"
+                            title="إرسال إشعار تتبع بالواتساب للعميل"
+                          >
+                            <MessageSquare className="w-3.5 h-3.5" />
+                          </button>
+
+                          <button
+                            onClick={() => {
+                              setBlacklistTarget({
+                                phone: order.phone_primary,
+                                name: order.customer_name,
+                              });
+                              setIsBlacklistModalOpen(true);
+                            }}
+                            className="p-1.5 rounded-lg text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+                            title="حظر العميل (إدراج بالقائمة السوداء)"
+                          >
+                            <UserX className="w-3.5 h-3.5" />
+                          </button>
 
                           <button
                             onClick={() => {
@@ -1047,6 +1320,101 @@ export function OrdersTable({
           </div>
         </div>
       )}
+
+      {/* Bulk Order Paste Modal */}
+      <BulkOrderPasteModal
+        isOpen={isBulkModalOpen}
+        onClose={() => setIsBulkModalOpen(false)}
+        shippingRates={DEFAULT_GOVERNORATES}
+        onSuccess={loadOrders}
+      />
+
+      {/* Multi-Carrier Export Modal */}
+      <CarrierExportModal
+        isOpen={isCarrierExportOpen}
+        onClose={() => setIsCarrierExportOpen(false)}
+        selectedIds={selectedIds}
+        totalFilteredCount={totalOrders}
+        search={search}
+        printStatus={printStatus}
+        deliveryStatus={deliveryStatus}
+        settlementStatus={settlementStatus}
+        paymentStatus={paymentStatus}
+        startDate={startDate}
+        endDate={endDate}
+        onExportSuccess={loadOrders}
+      />
+
+      {/* Barcode Handover Scanner Modal */}
+      <BarcodeHandoverScannerModal
+        isOpen={isScannerOpen}
+        onClose={() => setIsScannerOpen(false)}
+        orders={orders}
+        onHandoverComplete={loadOrders}
+      />
+
+      {/* WhatsApp Notification Dispatcher Modal */}
+      <WhatsAppNotificationModal
+        isOpen={isWhatsAppModalOpen}
+        onClose={() => setIsWhatsAppModalOpen(false)}
+        orders={whatsAppOrders}
+      />
+
+      {/* Customer Blacklist & Fraud Protection Modal */}
+      <CustomerBlacklistModal
+        isOpen={isBlacklistModalOpen}
+        onClose={() => {
+          setIsBlacklistModalOpen(false);
+          setBlacklistTarget(null);
+        }}
+        initialPhoneToAdd={blacklistTarget?.phone || ""}
+        initialNameToAdd={blacklistTarget?.name || ""}
+      />
+
+      {/* Order Tags & Lifecycle Labels Modal */}
+      <OrderTagsModal
+        isOpen={isTagsModalOpen}
+        onClose={() => {
+          setIsTagsModalOpen(false);
+          setSingleTagTargetOrderId(undefined);
+          setSingleTagInitialIds([]);
+          setBatchTagTargetIds([]);
+        }}
+        targetOrderId={singleTagTargetOrderId}
+        initialSelectedTagIds={singleTagInitialIds}
+        targetOrderIds={batchTagTargetIds}
+        onSuccess={loadOrders}
+      />
+
+      {/* Order Activity & Audit Trail Modal */}
+      <OrderTimelineModal
+        isOpen={Boolean(timelineOrderId)}
+        onClose={() => setTimelineOrderId(null)}
+        orderId={timelineOrderId}
+      />
+
+      {/* Courier Delivery Manifest Modal (A4 Handover Sheet) */}
+      <CourierManifestModal
+        isOpen={isManifestModalOpen}
+        onClose={() => setIsManifestModalOpen(false)}
+        orders={orders.filter((o) => selectedIds.includes(o.id))}
+        onHandoverAction={handleManifestHandover}
+        onHandoverSuccess={() => {
+          setSelectedIds([]);
+          loadOrders();
+        }}
+      />
+
+      {/* Smart Carrier Routing & Regional Optimization Modal */}
+      <SmartCarrierRoutingModal
+        isOpen={isSmartRoutingOpen}
+        onClose={() => setIsSmartRoutingOpen(false)}
+        selectedOrders={orders.filter((o) => selectedIds.includes(o.id))}
+        onSuccess={() => {
+          setSelectedIds([]);
+          loadOrders();
+        }}
+      />
     </div>
   );
 }

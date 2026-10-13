@@ -17,16 +17,34 @@ import {
   XCircle,
   RefreshCw,
   Info,
+  Sparkles,
+  Edit2,
+  Trash2,
+  Check,
+  X,
+  ShieldAlert,
+  UserCheck,
+  RotateCcw,
+  EyeOff,
+  Eye,
 } from "lucide-react";
 import { OrderInsert, GovernorateRate } from "@/types/database";
 import { formatEgp, calculateCod, calculateNetProfit } from "@/lib/calculations";
 import { DEFAULT_GOVERNORATES } from "@/lib/governorates";
 import {
   detectColumnMappings,
+  detectPlatformPreset,
+  PLATFORM_PRESETS,
   validateImportRow,
   generateSampleExcelTemplate,
   FIELD_LABELS,
   ValidatedImportRow,
+  detectIntraSheetDuplicates,
+  classifyDbDuplicates,
+  revalidateSingleRow,
+  applyDuplicateResolutionStrategy,
+  splitAndNormalizePhoneNumbers,
+  DuplicateSeverity,
 } from "@/lib/excel-import";
 import {
   batchCreateOrdersAction,
@@ -51,11 +69,21 @@ export function ExcelImportWizard() {
   const [headers, setHeaders] = useState<string[]>([]);
   const [rawRows, setRawRows] = useState<Record<string, unknown>[]>([]);
   const [columnMapping, setColumnMapping] = useState<Record<string, string>>({});
+  const [detectedPreset, setDetectedPreset] = useState<string>("custom");
 
   // Validation results
   const [validatedRows, setValidatedRows] = useState<ValidatedImportRow[]>([]);
-  const [previewFilter, setPreviewFilter] = useState<"all" | "valid" | "invalid" | "duplicate">("all");
+  const [previewFilter, setPreviewFilter] = useState<
+    "all" | "valid" | "invalid" | "duplicate" | "excluded"
+  >("all");
   const [isValidatingDuplicates, setIsValidatingDuplicates] = useState(false);
+  const [duplicateStrategy, setDuplicateStrategy] = useState<
+    "skip_all" | "skip_exact_only" | "import_all"
+  >("skip_exact_only");
+
+  // Inline editing state
+  const [editingRowNumber, setEditingRowNumber] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState<Partial<OrderInsert>>({});
 
   // Load configured shipping rates on mount
   useEffect(() => {
@@ -128,9 +156,11 @@ export function ExcelImportWizard() {
         setHeaders(sheetHeaders);
         setRawRows(jsonRows);
 
-        // Auto-detect mappings
+        // Auto-detect mappings & platform preset
         const detected = detectColumnMappings(sheetHeaders);
         setColumnMapping(detected);
+        const presetInfo = detectPlatformPreset(sheetHeaders);
+        setDetectedPreset(presetInfo.preset);
 
         setCurrentStep("mapping");
       } catch (err: unknown) {
@@ -149,63 +179,86 @@ export function ExcelImportWizard() {
     }
   };
 
-  // Handle Governorates resolution
+  // Handle Governorates resolution for single row
   const handleResolveGovernorate = (rowNumber: number, selectedGovName: string) => {
     setValidatedRows((prev) =>
       prev.map((r) => {
         if (r.rowNumber !== rowNumber) return r;
-        const govRate = shippingRates.find((g) => g.name === selectedGovName);
-        if (!govRate) return r;
-
-        const newShipping = govRate.rate;
-        const orderTotal = r.data?.order_total ?? 0;
-        const paidAmount = r.data?.paid_amount ?? 0;
-        const newCod = calculateCod(orderTotal, paidAmount);
-        const newProfit = calculateNetProfit(orderTotal, newShipping);
-
-        const remainingErrors = r.errors.filter(
-          (err) => !err.includes("المحافظة")
-        );
-
-        const updatedData: OrderInsert = {
-          ...(r.data as OrderInsert),
-          governorate: selectedGovName,
-          shipping_cost: newShipping,
-          cod_amount: newCod,
-          net_profit: newProfit,
-        };
-
-        return {
-          ...r,
-          governorateMatched: true,
-          errors: remainingErrors,
-          isValid: remainingErrors.length === 0,
-          data: updatedData,
-        };
+        return revalidateSingleRow(r, { governorate: selectedGovName }, shippingRates);
       })
     );
   };
 
-  // Duplicate skip toggle
+  // Inline editing handlers
+  const handleStartEdit = (row: ValidatedImportRow) => {
+    setEditingRowNumber(row.rowNumber);
+    setEditDraft({
+      customer_name:
+        row.data?.customer_name || String(row.raw[columnMapping.customer_name] || ""),
+      phone_primary:
+        row.data?.phone_primary || String(row.raw[columnMapping.phone_primary] || ""),
+      phone_secondary:
+        row.data?.phone_secondary ||
+        (row.raw[columnMapping.phone_secondary]
+          ? String(row.raw[columnMapping.phone_secondary])
+          : null),
+      governorate: row.data?.governorate || row.governorateRaw || "",
+      address: row.data?.address || String(row.raw[columnMapping.address] || ""),
+      order_total:
+        row.data?.order_total ?? (Number(row.raw[columnMapping.order_total]) || 0),
+      paid_amount:
+        row.data?.paid_amount ?? (Number(row.raw[columnMapping.paid_amount]) || 0),
+      shipping_cost: row.data?.shipping_cost ?? 0,
+      important_notes:
+        row.data?.important_notes ||
+        (row.raw[columnMapping.important_notes]
+          ? String(row.raw[columnMapping.important_notes])
+          : null),
+    });
+  };
+
+  const handleCancelEdit = () => {
+    setEditingRowNumber(null);
+    setEditDraft({});
+  };
+
+  const handleSaveEdit = (rowNumber: number) => {
+    setValidatedRows((prev) =>
+      prev.map((r) => {
+        if (r.rowNumber !== rowNumber) return r;
+        return revalidateSingleRow(r, editDraft, shippingRates);
+      })
+    );
+    setEditingRowNumber(null);
+    setEditDraft({});
+  };
+
+  const handleToggleExcludeRow = (rowNumber: number) => {
+    setValidatedRows((prev) =>
+      prev.map((r) =>
+        r.rowNumber === rowNumber ? { ...r, isExcluded: !r.isExcluded } : r
+      )
+    );
+  };
+
+  // Duplicate skip toggle for single row
   const handleToggleSkipDuplicate = (rowNumber: number) => {
     setValidatedRows((prev) =>
       prev.map((r) =>
-        r.rowNumber === rowNumber
-          ? { ...r, skipDuplicate: !r.skipDuplicate }
-          : r
+        r.rowNumber === rowNumber ? { ...r, skipDuplicate: !r.skipDuplicate } : r
       )
     );
   };
 
-  const handleBulkSetDuplicateSkip = (skip: boolean) => {
-    setValidatedRows((prev) =>
-      prev.map((r) =>
-        r.isDuplicate ? { ...r, skipDuplicate: skip } : r
-      )
-    );
+  // Bulk duplicate resolution strategy
+  const handleApplyDuplicateStrategy = (
+    strategy: "skip_all" | "skip_exact_only" | "import_all"
+  ) => {
+    setDuplicateStrategy(strategy);
+    setValidatedRows((prev) => applyDuplicateResolutionStrategy(prev, strategy));
   };
 
-  // Proceed to Preview with Duplicate Checking
+  // Proceed to Preview with Multi-Level Duplicate Checking
   const handleProceedToPreview = async () => {
     const required = [
       "customer_name",
@@ -230,68 +283,35 @@ export function ExcelImportWizard() {
 
     try {
       // 1. Initial row validation with loaded shippingRates
-      const validated = rawRows.map((row, idx) =>
+      const initialValidated = rawRows.map((row, idx) =>
         validateImportRow(row, columnMapping, idx + 1, shippingRates)
       );
 
       // 2. Intra-sheet duplicate detection
-      const phoneToIndices = new Map<string, number[]>();
-      const phoneList: string[] = [];
-
-      validated.forEach((r, idx) => {
-        const p = r.data?.phone_primary || "";
-        if (p) {
-          phoneList.push(p);
-          const list = phoneToIndices.get(p) || [];
-          list.push(idx);
-          phoneToIndices.set(p, list);
-        }
-      });
-
-      phoneToIndices.forEach((indices, phone) => {
-        if (indices.length > 1) {
-          indices.forEach((idx) => {
-            validated[idx].isDuplicate = true;
-            validated[idx].duplicateReason = `مكرر داخل نفس الملف (نفس الهاتف ${phone} في ${indices.length} صفوف)`;
-            validated[idx].skipDuplicate = false;
-          });
-        }
-      });
+      let processed = detectIntraSheetDuplicates(initialValidated);
 
       // 3. Database existing duplicates check
+      const phoneList = Array.from(
+        new Set(
+          processed
+            .map((r) => r.data?.phone_primary)
+            .filter((p): p is string => Boolean(p && p.length >= 7))
+        )
+      );
+
       if (phoneList.length > 0) {
         const dupRes = await checkExistingPhoneDuplicatesAction(phoneList);
         if (dupRes.success && dupRes.data) {
-          const dbMatches = dupRes.data;
-          validated.forEach((r) => {
-            const p = r.data?.phone_primary || "";
-            if (p && dbMatches[p] && dbMatches[p].length > 0) {
-              const match = dbMatches[p][0];
-              r.isDuplicate = true;
-              const sameTotal =
-                Math.abs(Number(match.order_total) - Number(r.data?.order_total || 0)) < 0.01;
-              const sameName =
-                match.customer_name.trim().toLowerCase() ===
-                (r.data?.customer_name || "").trim().toLowerCase();
-
-              let reason = `يوجد أوردر سابق في النظام بنفس رقم الهاتف`;
-              if (sameTotal && sameName) {
-                reason = `يوجد أوردر مطابق في النظام بنفس الهاتف واسم العميل والمبلغ`;
-              } else if (sameTotal) {
-                reason = `يوجد أوردر سابق في النظام بنفس الهاتف ونفس المبلغ`;
-              } else if (sameName) {
-                reason = `يوجد أوردر سابق في النظام بنفس الهاتف ونفس الاسم`;
-              }
-
-              r.duplicateReason = reason;
-              r.matchedOrderSummary = `أوردر سابق #${match.id.slice(0, 8).toUpperCase()} | ${match.customer_name} | ${formatEgp(match.order_total)} | الحالة: ${match.delivery_status}`;
-              r.skipDuplicate = false;
-            }
-          });
+          processed = classifyDbDuplicates(processed, dupRes.data);
         }
       }
 
-      setValidatedRows(validated);
+      // Default strategy: skip exact duplicates only, keep returning customers
+      processed = applyDuplicateResolutionStrategy(processed, "skip_exact_only");
+
+      setValidatedRows(processed);
+      setEditingRowNumber(null);
+      setEditDraft({});
       setCurrentStep("preview");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "خطأ غير متوقع";
@@ -304,11 +324,13 @@ export function ExcelImportWizard() {
   // Execute Batch Import
   const handleExecuteImport = () => {
     const validOrders = validatedRows
-      .filter((r) => r.isValid && r.data !== null && !r.skipDuplicate)
+      .filter((r) => !r.isExcluded && r.isValid && r.data !== null && !r.skipDuplicate)
       .map((r) => r.data as OrderInsert);
 
     if (validOrders.length === 0) {
-      setError("لا توجد أي صفوف صالحة ومحددة للاستيراد (قد تكون كافة الصفوف بها أخطاء أو تم تحديد تجاهلها)");
+      setError(
+        "لا توجد أي صفوف صالحة ومحددة للاستيراد (قد تكون كافة الصفوف بها أخطاء أو تم تحديد تجاهلها أو استبعادها)"
+      );
       return;
     }
 
@@ -325,19 +347,35 @@ export function ExcelImportWizard() {
   };
 
   // Filtered rows in Preview
+  const nonExcludedRows = validatedRows.filter((r) => !r.isExcluded);
+  const excludedRows = validatedRows.filter((r) => r.isExcluded);
+  const validCount = nonExcludedRows.filter((r) => r.isValid).length;
+  const invalidCount = nonExcludedRows.filter((r) => !r.isValid).length;
+  const duplicateCount = nonExcludedRows.filter((r) => r.isDuplicate).length;
+  const exactDuplicateCount = nonExcludedRows.filter(
+    (r) =>
+      r.isDuplicate &&
+      (r.duplicateDetails?.severity === "exact_sheet" ||
+        r.duplicateDetails?.severity === "exact_db")
+  ).length;
+
+  const toImportRows = nonExcludedRows.filter(
+    (r) => r.isValid && r.data !== null && !r.skipDuplicate
+  );
+  const toImportCount = toImportRows.length;
+  const totalCodToCollect = toImportRows.reduce(
+    (sum, r) => sum + (r.data?.cod_amount || 0),
+    0
+  );
+
   const displayedRows = validatedRows.filter((r) => {
+    if (previewFilter === "excluded") return r.isExcluded;
+    if (r.isExcluded) return false;
     if (previewFilter === "valid") return r.isValid && !r.skipDuplicate;
     if (previewFilter === "invalid") return !r.isValid;
     if (previewFilter === "duplicate") return r.isDuplicate;
     return true;
   });
-
-  const validCount = validatedRows.filter((r) => r.isValid).length;
-  const invalidCount = validatedRows.length - validCount;
-  const duplicateCount = validatedRows.filter((r) => r.isDuplicate).length;
-  const toImportCount = validatedRows.filter(
-    (r) => r.isValid && r.data !== null && !r.skipDuplicate
-  ).length;
 
   return (
     <div className="space-y-6">
@@ -500,6 +538,51 @@ export function ExcelImportWizard() {
             </button>
           </div>
 
+          {/* Preset & Auto-Match Status Banner */}
+          <div className="bg-gradient-to-r from-indigo-50 via-blue-50 to-slate-50 border border-indigo-200/70 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-sm">
+                <Sparkles className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-slate-900 text-sm">
+                    القالب المكتشف: {PLATFORM_PRESETS[detectedPreset]?.name || "ملف مخصص"}
+                  </span>
+                  <span className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-full">
+                    مطابقة تلقائية ⚡
+                  </span>
+                </div>
+                <p className="text-slate-500 mt-0.5">
+                  تمت مطابقة {Object.values(columnMapping).filter(Boolean).length} من أصل {Object.keys(FIELD_LABELS).length} حقول تلقائياً. يمكنك تعديل أي حقل بحرية.
+                </p>
+              </div>
+            </div>
+
+            {/* Quick Preset Selector */}
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-[11px] text-slate-400 font-medium ml-1">تطبيق قالب:</span>
+              {Object.entries(PLATFORM_PRESETS).map(([key, p]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => {
+                    setDetectedPreset(key);
+                    const autoMap = detectColumnMappings(headers);
+                    setColumnMapping(autoMap);
+                  }}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all border ${
+                    detectedPreset === key
+                      ? "bg-indigo-600 text-white border-indigo-600 shadow-sm"
+                      : "bg-white text-slate-700 border-slate-200 hover:bg-slate-100"
+                  }`}
+                >
+                  {p.name.split(" ")[0]}
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Mapping Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {Object.entries(FIELD_LABELS).map(([fieldKey, label]) => {
@@ -548,11 +631,16 @@ export function ExcelImportWizard() {
                     className="w-full text-xs px-3 py-2 bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
                   >
                     <option value="">-- غير محدد / تجاهل العمود --</option>
-                    {headers.map((h) => (
-                      <option key={h} value={h}>
-                        {h} {rawRows[0]?.[h] ? `(مثال: ${String(rawRows[0][h]).slice(0, 20)})` : ""}
-                      </option>
-                    ))}
+                    {headers.map((h) => {
+                      const sample1 = rawRows[0]?.[h] ? String(rawRows[0][h]).trim() : "";
+                      const sample2 = rawRows[1]?.[h] ? String(rawRows[1][h]).trim() : "";
+                      const sampleText = [sample1, sample2].filter(Boolean).slice(0, 2).join(" | ");
+                      return (
+                        <option key={h} value={h}>
+                          {h} {sampleText ? `(مثال: ${sampleText.slice(0, 30)})` : ""}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
               );
@@ -594,13 +682,14 @@ export function ExcelImportWizard() {
       {/* ========================================================= */}
       {currentStep === "preview" && (
         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
+          {/* Top Header & Overview */}
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 border-b border-slate-100 pb-4">
             <div>
               <h2 className="text-lg font-bold text-slate-900">
                 مراجعة وتدقيق البيانات قبل الإدراج
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                تحديد أسعار الشحن حسب المحافظات، واكتشاف الأوردرات المكررة قبل الحفظ
+                فحص ذكي للمكررات، وتدقيق المحافظات وأسعار الشحن، مع إمكانية التعديل الفوري داخل الجدول
               </p>
             </div>
 
@@ -626,7 +715,7 @@ export function ExcelImportWizard() {
                 }`}
               >
                 <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>محدد للاستيراد ({toImportCount})</span>
+                <span>جاهز للاستيراد ({toImportCount})</span>
               </button>
 
               <button
@@ -651,197 +740,533 @@ export function ExcelImportWizard() {
                   }`}
                 >
                   <AlertTriangle className="w-3.5 h-3.5" />
-                  <span>مكرر محتمل ({duplicateCount})</span>
+                  <span>مكررات ({duplicateCount})</span>
+                </button>
+              )}
+
+              {excludedRows.length > 0 && (
+                <button
+                  onClick={() => setPreviewFilter("excluded")}
+                  className={`px-3 py-1.5 rounded-lg transition-all flex items-center gap-1 ${
+                    previewFilter === "excluded"
+                      ? "bg-slate-700 text-white shadow-sm"
+                      : "text-slate-500 hover:text-slate-800"
+                  }`}
+                >
+                  <EyeOff className="w-3.5 h-3.5" />
+                  <span>مستبعد ({excludedRows.length})</span>
                 </button>
               )}
             </div>
           </div>
 
-          {/* Validation Notice */}
+          {/* KPI Summary Cards */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+            <div className="p-3 bg-emerald-50/70 border border-emerald-200 rounded-xl">
+              <span className="text-emerald-700 font-medium block">جاهز للاستيراد</span>
+              <div className="flex items-baseline gap-2 mt-1">
+                <span className="text-xl font-bold text-emerald-900">{toImportCount}</span>
+                <span className="text-[11px] text-emerald-600 font-semibold">
+                  ({formatEgp(totalCodToCollect)} COD)
+                </span>
+              </div>
+            </div>
+
+            <div
+              className={`p-3 rounded-xl border ${
+                invalidCount > 0
+                  ? "bg-rose-50/70 border-rose-200 text-rose-900"
+                  : "bg-slate-50 border-slate-200 text-slate-600"
+              }`}
+            >
+              <span className="font-medium block">يحتاج تصحيح</span>
+              <span className="text-xl font-bold mt-1 block">
+                {invalidCount} {invalidCount > 0 ? "صف" : "✓ لا يوجد"}
+              </span>
+            </div>
+
+            <div
+              className={`p-3 rounded-xl border ${
+                duplicateCount > 0
+                  ? "bg-amber-50/70 border-amber-200 text-amber-900"
+                  : "bg-slate-50 border-slate-200 text-slate-600"
+              }`}
+            >
+              <span className="font-medium block">مكررات مكتشفة</span>
+              <div className="flex items-baseline gap-2 mt-1">
+                <span className="text-xl font-bold">{duplicateCount}</span>
+                {exactDuplicateCount > 0 && (
+                  <span className="text-[10px] text-rose-700 font-bold">
+                    ({exactDuplicateCount} تطابق تام)
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-700">
+              <span className="font-medium block">إجمالي صفوف الملف</span>
+              <span className="text-xl font-bold mt-1 block">{validatedRows.length} صف</span>
+            </div>
+          </div>
+
+          {/* Validation Notice for Errors */}
           {invalidCount > 0 && (
-            <div className="p-3.5 bg-rose-50 border border-rose-300 rounded-xl text-rose-900 text-xs flex items-center justify-between gap-3">
+            <div className="p-3.5 bg-rose-50 border border-rose-300 rounded-xl text-rose-900 text-xs flex items-center justify-between gap-3 shadow-sm">
               <div className="flex items-center gap-2">
                 <XCircle className="w-4 h-4 text-rose-600 shrink-0" />
                 <span>
                   يوجد <strong>{invalidCount}</strong> صف يحتوي على أخطاء (مثل محافظة غير محددة أو هاتف خاطئ).
-                  يرجى تحديد المحافظة يدويًا من الجدول أدناه لتصحيحه، أو سيتم استيراد الصفوف الصالحة فقط.
+                  يمكنك الضغط على <strong>&ldquo;تعديل سريع&rdquo;</strong> لتصحيح الصف مباشرة بالجدول دون الحاجة لإعادة رفع الملف.
                 </span>
               </div>
             </div>
           )}
 
-          {/* Duplicate Banner with Bulk Actions */}
+          {/* Advanced Duplicate Resolution Strategy Banner */}
           {duplicateCount > 0 && (
-            <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-xl text-amber-900 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                <span>
-                  تم اكتشاف <strong>{duplicateCount}</strong> أوردر يحتمل أن يكون مكرراً.
-                  يمكنك استيرادها على أي حال أو تجاهلها دون إيقاف باقي الملف.
-                </span>
-              </div>
-              <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
-                <button
-                  type="button"
-                  onClick={() => handleBulkSetDuplicateSkip(false)}
-                  className="px-2.5 py-1 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 font-bold rounded-lg text-[11px] transition-colors shadow-sm"
-                >
-                  استيراد جميع المكررات
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleBulkSetDuplicateSkip(true)}
-                  className="px-2.5 py-1 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 font-bold rounded-lg text-[11px] transition-colors"
-                >
-                  تجاهل جميع المكررات
-                </button>
+            <div className="p-4 bg-gradient-to-r from-amber-50 via-orange-50 to-slate-50 border border-amber-300 rounded-xl text-amber-900 text-xs space-y-3 shadow-sm">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-amber-500 text-white flex items-center justify-center shrink-0 shadow-sm">
+                    <ShieldAlert className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <span className="font-bold text-sm text-slate-900">
+                      إدارة ومعالجة المكررات ({duplicateCount} أوردر)
+                    </span>
+                    <p className="text-[11px] text-amber-800 mt-0.5">
+                      يميز النظام بين الطلب المكرر بالخطأ (نفس العميل والمبلغ) وبين العميل السابق الذي طلب مجدداً.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Strategy Action Buttons */}
+                <div className="flex items-center gap-2 flex-wrap self-end sm:self-auto shrink-0 pt-1 sm:pt-0">
+                  <button
+                    type="button"
+                    onClick={() => handleApplyDuplicateStrategy("skip_exact_only")}
+                    className={`px-3 py-1.5 rounded-lg font-bold text-[11px] transition-all flex items-center gap-1 border shadow-sm ${
+                      duplicateStrategy === "skip_exact_only"
+                        ? "bg-amber-600 text-white border-amber-600 shadow-amber-500/20"
+                        : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+                    }`}
+                  >
+                    <span>⭐ تخطي التطابق التام فقط (مستحسن)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleApplyDuplicateStrategy("skip_all")}
+                    className={`px-3 py-1.5 rounded-lg font-bold text-[11px] transition-all border ${
+                      duplicateStrategy === "skip_all"
+                        ? "bg-rose-600 text-white border-rose-600 shadow-sm"
+                        : "bg-white text-rose-700 border-rose-200 hover:bg-rose-50"
+                    }`}
+                  >
+                    تخطي جميع المكررات
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleApplyDuplicateStrategy("import_all")}
+                    className={`px-3 py-1.5 rounded-lg font-bold text-[11px] transition-all border ${
+                      duplicateStrategy === "import_all"
+                        ? "bg-emerald-600 text-white border-emerald-600 shadow-sm"
+                        : "bg-white text-emerald-700 border-emerald-200 hover:bg-emerald-50"
+                    }`}
+                  >
+                    استيراد الكل
+                  </button>
+                </div>
               </div>
             </div>
           )}
 
           {/* Preview Table */}
-          <div className="border border-slate-200 rounded-xl overflow-hidden overflow-x-auto">
+          <div className="border border-slate-200 rounded-xl overflow-hidden overflow-x-auto shadow-sm">
             <table className="w-full text-right text-xs">
               <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold">
                 <tr>
                   <th className="p-3 w-10 text-center">#</th>
-                  <th className="p-3">حالة التدقيق</th>
-                  <th className="p-3">اسم العميل</th>
-                  <th className="p-3">الهاتف</th>
-                  <th className="p-3">المحافظة والشحن</th>
-                  <th className="p-3">العنوان</th>
-                  <th className="p-3">سعر الأوردر</th>
-                  <th className="p-3">المطلوب (COD)</th>
-                  <th className="p-3">صافي الربح</th>
-                  <th className="p-3 text-center">قرار الاستيراد</th>
+                  <th className="p-3 min-w-[130px]">حالة التدقيق</th>
+                  <th className="p-3 min-w-[140px]">اسم العميل</th>
+                  <th className="p-3 min-w-[130px]">الهاتف</th>
+                  <th className="p-3 min-w-[150px]">المحافظة والشحن</th>
+                  <th className="p-3 min-w-[160px]">العنوان</th>
+                  <th className="p-3 min-w-[90px]">سعر الأوردر</th>
+                  <th className="p-3 min-w-[90px]">المطلوب (COD)</th>
+                  <th className="p-3 min-w-[90px]">صافي الربح</th>
+                  <th className="p-3 text-center min-w-[130px]">إجراءات الصف</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {displayedRows.slice(0, 100).map((row) => (
-                  <tr
-                    key={row.rowNumber}
-                    className={`hover:bg-slate-50/80 transition-colors ${
-                      !row.isValid ? "bg-rose-50/30" : row.isDuplicate ? "bg-amber-50/20" : ""
-                    }`}
-                  >
-                    <td className="p-3 text-center text-slate-400 font-mono">
-                      {row.rowNumber}
-                    </td>
+                {displayedRows.slice(0, 100).map((row) => {
+                  const isEditing = editingRowNumber === row.rowNumber;
 
-                    <td className="p-3">
-                      {row.isValid ? (
-                        <div className="space-y-1">
-                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
-                            <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                            صالح
-                          </span>
-                          {row.isDuplicate && (
-                            <div className="text-[10px] text-amber-700 font-semibold leading-tight">
-                              ⚠️ {row.duplicateReason}
-                            </div>
-                          )}
-                        </div>
-                      ) : (
-                        <div className="space-y-0.5">
-                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded">
-                            <XCircle className="w-3 h-3 text-rose-600" />
-                            خطأ
-                          </span>
-                          <div className="text-[10px] text-rose-600 font-semibold leading-tight">
-                            {row.errors.join(" • ")}
-                          </div>
-                        </div>
-                      )}
-                    </td>
+                  if (isEditing) {
+                    // Inline Editing Row
+                    return (
+                      <tr key={row.rowNumber} className="bg-blue-50/60 transition-colors">
+                        <td className="p-3 text-center font-mono font-bold text-blue-700">
+                          {row.rowNumber}
+                        </td>
 
-                    <td className="p-3 font-bold text-slate-900">
-                      {row.data?.customer_name || String(row.raw[columnMapping.customer_name] || "-")}
-                    </td>
-
-                    <td className="p-3 font-mono" dir="ltr">
-                      {row.data?.phone_primary || String(row.raw[columnMapping.phone_primary] || "-")}
-                    </td>
-
-                    <td className="p-3">
-                      {row.governorateMatched ? (
-                        <div>
-                          <span className="px-2 py-0.5 bg-slate-100 text-slate-800 rounded font-bold inline-block">
-                            {row.data?.governorate}
+                        <td className="p-3">
+                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-blue-700 bg-blue-100 border border-blue-200 px-2 py-0.5 rounded">
+                            <Edit2 className="w-3 h-3" />
+                            تعديل مباشر
                           </span>
-                          <span className="text-[11px] text-blue-600 font-semibold block mt-0.5">
-                            شحن: {formatEgp(row.data?.shipping_cost ?? 0)}
-                          </span>
-                        </div>
-                      ) : (
-                        <div className="space-y-1 min-w-[150px]">
-                          <div className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-1.5 py-0.5 rounded">
-                            غير معروفة ({row.governorateRaw || "فارغة"})
-                          </div>
+                        </td>
+
+                        <td className="p-2">
+                          <input
+                            type="text"
+                            value={editDraft.customer_name || ""}
+                            onChange={(e) =>
+                              setEditDraft((prev) => ({ ...prev, customer_name: e.target.value }))
+                            }
+                            placeholder="اسم العميل"
+                            className="w-full text-xs p-1.5 bg-white border border-blue-400 rounded-lg font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          />
+                        </td>
+
+                        <td className="p-2">
+                          <input
+                            type="text"
+                            dir="ltr"
+                            value={editDraft.phone_primary || ""}
+                            onChange={(e) =>
+                              setEditDraft((prev) => ({ ...prev, phone_primary: e.target.value }))
+                            }
+                            onBlur={() => {
+                              if (editDraft.phone_primary) {
+                                const split = splitAndNormalizePhoneNumbers(editDraft.phone_primary);
+                                setEditDraft((prev) => ({
+                                  ...prev,
+                                  phone_primary: split.primary,
+                                  phone_secondary: prev.phone_secondary || split.secondary || null,
+                                }));
+                              }
+                            }}
+                            placeholder="رقم الهاتف"
+                            className="w-full text-xs p-1.5 bg-white border border-blue-400 rounded-lg font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          />
+                        </td>
+
+                        <td className="p-2">
                           <select
-                            defaultValue=""
-                            onChange={(e) => handleResolveGovernorate(row.rowNumber, e.target.value)}
-                            className="w-full text-xs p-1 bg-white border border-amber-400 rounded-lg text-slate-800 font-bold focus:ring-2 focus:ring-blue-500 shadow-sm"
+                            value={editDraft.governorate || ""}
+                            onChange={(e) => {
+                              const govName = e.target.value;
+                              const gRate = shippingRates.find((g) => g.name === govName);
+                              const newRate = gRate?.rate ?? 0;
+                              setEditDraft((prev) => ({
+                                ...prev,
+                                governorate: govName,
+                                shipping_cost: newRate,
+                              }));
+                            }}
+                            className="w-full text-xs p-1.5 bg-white border border-blue-400 rounded-lg font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
                           >
-                            <option value="" disabled>-- حدد المحافظة --</option>
+                            <option value="">-- حدد المحافظة --</option>
                             {shippingRates.map((g) => (
                               <option key={g.name} value={g.name}>
                                 {g.name} ({g.rate} ج.م)
                               </option>
                             ))}
                           </select>
-                        </div>
-                      )}
-                    </td>
+                        </td>
 
-                    <td className="p-3 max-w-xs truncate text-slate-600" title={row.data?.address || String(row.raw[columnMapping.address] || "-")}>
-                      {row.data?.address || String(row.raw[columnMapping.address] || "-")}
-                    </td>
+                        <td className="p-2">
+                          <input
+                            type="text"
+                            value={editDraft.address || ""}
+                            onChange={(e) =>
+                              setEditDraft((prev) => ({ ...prev, address: e.target.value }))
+                            }
+                            placeholder="العنوان بالتفصيل"
+                            className="w-full text-xs p-1.5 bg-white border border-blue-400 rounded-lg text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          />
+                        </td>
 
-                    <td className="p-3 font-bold text-slate-900">
-                      {row.data?.order_total !== undefined
-                        ? formatEgp(row.data.order_total)
-                        : String(row.raw[columnMapping.order_total] || "-")}
-                    </td>
+                        <td className="p-2">
+                          <input
+                            type="number"
+                            min="0"
+                            value={editDraft.order_total ?? 0}
+                            onChange={(e) =>
+                              setEditDraft((prev) => ({
+                                ...prev,
+                                order_total: Number(e.target.value),
+                              }))
+                            }
+                            className="w-20 text-xs p-1.5 bg-white border border-blue-400 rounded-lg font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          />
+                        </td>
 
-                    <td className="p-3 font-bold text-slate-900">
-                      {row.data?.cod_amount !== undefined ? (
-                        row.data.cod_amount === 0 ? (
-                          <span className="text-emerald-700 font-bold">مدفوع بالكامل</span>
+                        <td className="p-2">
+                          <div className="text-[11px] font-bold text-slate-700">
+                            {formatEgp(
+                              calculateCod(
+                                editDraft.order_total ?? 0,
+                                editDraft.paid_amount ?? 0
+                              )
+                            )}
+                          </div>
+                        </td>
+
+                        <td className="p-2">
+                          <div className="text-[11px] font-bold text-emerald-700">
+                            {formatEgp(
+                              calculateNetProfit(
+                                editDraft.order_total ?? 0,
+                                editDraft.shipping_cost ?? 0
+                              )
+                            )}
+                          </div>
+                        </td>
+
+                        <td className="p-2 text-center">
+                          <div className="flex items-center justify-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleSaveEdit(row.rowNumber)}
+                              className="p-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition-colors shadow-sm"
+                              title="حفظ التعديلات"
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleCancelEdit}
+                              className="p-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg transition-colors"
+                              title="إلغاء التعديل"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  }
+
+                  // Normal Row Display
+                  return (
+                    <tr
+                      key={row.rowNumber}
+                      className={`hover:bg-slate-50/80 transition-colors ${
+                        row.isExcluded
+                          ? "bg-slate-100/50 opacity-40 line-through"
+                          : !row.isValid
+                          ? "bg-rose-50/30"
+                          : row.isDuplicate
+                          ? row.duplicateDetails?.badgeVariant === "rose"
+                            ? "bg-rose-50/20"
+                            : "bg-amber-50/20"
+                          : ""
+                      }`}
+                    >
+                      <td className="p-3 text-center text-slate-400 font-mono">
+                        {row.rowNumber}
+                      </td>
+
+                      <td className="p-3">
+                        {row.isExcluded ? (
+                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-500 bg-slate-100 border border-slate-300 px-2 py-0.5 rounded">
+                            مستبعد
+                          </span>
+                        ) : row.isValid ? (
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-1 flex-wrap">
+                              <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                صالح
+                              </span>
+
+                              {row.isManuallyEdited && (
+                                <span className="inline-flex items-center text-[10px] font-bold text-purple-700 bg-purple-50 border border-purple-200 px-1.5 py-0.5 rounded">
+                                  معدل يدوياً ✓
+                                </span>
+                              )}
+                            </div>
+
+                            {row.isDuplicate && (
+                              <div className="space-y-0.5">
+                                <span
+                                  className={`inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded border ${
+                                    row.duplicateDetails?.badgeVariant === "rose"
+                                      ? "bg-rose-50 text-rose-800 border-rose-200"
+                                      : row.duplicateDetails?.badgeVariant === "blue"
+                                      ? "bg-blue-50 text-blue-800 border-blue-200"
+                                      : "bg-amber-50 text-amber-800 border-amber-200"
+                                  }`}
+                                >
+                                  {row.duplicateDetails?.badgeVariant === "blue" ? (
+                                    <UserCheck className="w-3 h-3 text-blue-600" />
+                                  ) : (
+                                    <AlertTriangle className="w-3 h-3" />
+                                  )}
+                                  {row.duplicateDetails?.badgeText || "مكرر"}
+                                </span>
+                                <div className="text-[10px] text-slate-600 font-medium leading-tight">
+                                  {row.duplicateReason}
+                                </div>
+                              </div>
+                            )}
+                          </div>
                         ) : (
-                          formatEgp(row.data.cod_amount)
-                        )
-                      ) : (
-                        "-"
-                      )}
-                    </td>
+                          <div className="space-y-1">
+                            <span className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded">
+                              <XCircle className="w-3 h-3 text-rose-600" />
+                              خطأ ({row.errors.length})
+                            </span>
+                            <div className="text-[10px] text-rose-600 font-semibold leading-tight">
+                              {row.errors.join(" • ")}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleStartEdit(row)}
+                              className="text-[10px] font-bold text-blue-600 hover:text-blue-800 hover:underline flex items-center gap-0.5"
+                            >
+                              <Edit2 className="w-2.5 h-2.5" />
+                              <span>تصحيح فوري</span>
+                            </button>
+                          </div>
+                        )}
+                      </td>
 
-                    <td className="p-3 font-bold text-emerald-700">
-                      {row.data?.net_profit !== undefined
-                        ? formatEgp(row.data.net_profit)
-                        : "-"}
-                    </td>
+                      <td className="p-3 font-bold text-slate-900">
+                        {row.data?.customer_name ||
+                          String(row.raw[columnMapping.customer_name] || "-")}
+                      </td>
 
-                    <td className="p-3 text-center">
-                      {!row.isValid ? (
-                        <span className="text-[10px] text-rose-600 font-bold">يحتاج تصحيح</span>
-                      ) : row.isDuplicate ? (
-                        <button
-                          type="button"
-                          onClick={() => handleToggleSkipDuplicate(row.rowNumber)}
-                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all border ${
-                            row.skipDuplicate
-                              ? "bg-slate-100 text-slate-500 border-slate-300"
-                              : "bg-emerald-50 text-emerald-700 border-emerald-300 shadow-sm"
-                          }`}
-                        >
-                          {row.skipDuplicate ? "متجاهل (تخطي)" : "استيراد على أي حال ✓"}
-                        </button>
-                      ) : (
-                        <span className="text-[11px] font-bold text-emerald-700">جاهز ✓</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                      <td className="p-3 font-mono" dir="ltr">
+                        <div>
+                          {row.data?.phone_primary ||
+                            String(row.raw[columnMapping.phone_primary] || "-")}
+                        </div>
+                        {row.data?.phone_secondary && (
+                          <div className="text-[10px] text-slate-400 mt-0.5 font-mono">
+                            إضافي: {row.data.phone_secondary}
+                          </div>
+                        )}
+                      </td>
+
+                      <td className="p-3">
+                        {row.governorateMatched ? (
+                          <div>
+                            <span className="px-2 py-0.5 bg-slate-100 text-slate-800 rounded font-bold inline-block">
+                              {row.data?.governorate}
+                            </span>
+                            <span className="text-[11px] text-blue-600 font-semibold block mt-0.5">
+                              شحن: {formatEgp(row.data?.shipping_cost ?? 0)}
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="space-y-1 min-w-[150px]">
+                            <div className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-1.5 py-0.5 rounded">
+                              غير معروفة ({row.governorateRaw || "فارغة"})
+                            </div>
+                            <select
+                              defaultValue=""
+                              onChange={(e) =>
+                                handleResolveGovernorate(row.rowNumber, e.target.value)
+                              }
+                              className="w-full text-xs p-1 bg-white border border-amber-400 rounded-lg text-slate-800 font-bold focus:ring-2 focus:ring-blue-500 shadow-sm"
+                            >
+                              <option value="" disabled>
+                                -- حدد المحافظة --
+                              </option>
+                              {shippingRates.map((g) => (
+                                <option key={g.name} value={g.name}>
+                                  {g.name} ({g.rate} ج.م)
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
+                      </td>
+
+                      <td
+                        className="p-3 max-w-xs truncate text-slate-600"
+                        title={
+                          row.data?.address || String(row.raw[columnMapping.address] || "-")
+                        }
+                      >
+                        {row.data?.address || String(row.raw[columnMapping.address] || "-")}
+                      </td>
+
+                      <td className="p-3 font-bold text-slate-900">
+                        {row.data?.order_total !== undefined
+                          ? formatEgp(row.data.order_total)
+                          : String(row.raw[columnMapping.order_total] || "-")}
+                      </td>
+
+                      <td className="p-3 font-bold text-slate-900">
+                        {row.data?.cod_amount !== undefined ? (
+                          row.data.cod_amount === 0 ? (
+                            <span className="text-emerald-700 font-bold">مدفوع بالكامل</span>
+                          ) : (
+                            formatEgp(row.data.cod_amount)
+                          )
+                        ) : (
+                          "-"
+                        )}
+                      </td>
+
+                      <td className="p-3 font-bold text-emerald-700">
+                        {row.data?.net_profit !== undefined
+                          ? formatEgp(row.data.net_profit)
+                          : "-"}
+                      </td>
+
+                      <td className="p-3 text-center">
+                        <div className="flex items-center justify-center gap-1.5">
+                          {row.isDuplicate && !row.isExcluded && row.isValid && (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleSkipDuplicate(row.rowNumber)}
+                              className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-all border ${
+                                row.skipDuplicate
+                                  ? "bg-slate-100 text-slate-500 border-slate-300"
+                                  : "bg-emerald-50 text-emerald-700 border-emerald-300 shadow-sm"
+                              }`}
+                              title={row.skipDuplicate ? "الضغط للاستيراد" : "الضغط للتخطي"}
+                            >
+                              {row.skipDuplicate ? "متجاهل" : "استيراد ✓"}
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() => handleStartEdit(row)}
+                            className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                            title="تعديل هذا الصف"
+                          >
+                            <Edit2 className="w-3.5 h-3.5" />
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleToggleExcludeRow(row.rowNumber)}
+                            className={`p-1.5 rounded-lg transition-colors ${
+                              row.isExcluded
+                                ? "text-emerald-600 hover:bg-emerald-50"
+                                : "text-slate-400 hover:text-rose-600 hover:bg-rose-50"
+                            }`}
+                            title={row.isExcluded ? "استعادة الصف" : "استبعاد الصف من الاستيراد"}
+                          >
+                            {row.isExcluded ? (
+                              <RotateCcw className="w-3.5 h-3.5" />
+                            ) : (
+                              <Trash2 className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

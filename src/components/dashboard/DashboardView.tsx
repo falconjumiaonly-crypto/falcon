@@ -18,12 +18,18 @@ import {
   RotateCcw,
   Building2,
   Wallet,
+  Sparkles,
+  BarChart3,
 } from "lucide-react";
 import { formatEgp } from "@/lib/calculations";
-import { getDashboardMetricsAction, DashboardMetrics } from "@/app/actions/orders";
+import { getDashboardMetricsAction, getOrdersAction, DashboardMetrics } from "@/app/actions/orders";
+import { Order } from "@/types/database";
+import { CarrierAnalyticsDashboard } from "@/components/analytics/CarrierAnalyticsDashboard";
 
 export function DashboardView() {
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [activeTab, setActiveTab] = useState<"overview" | "carriers">("overview");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -31,11 +37,19 @@ export function DashboardView() {
     setLoading(true);
     setError(null);
     try {
-      const res = await getDashboardMetricsAction();
+      const [res, ordersRes] = await Promise.all([
+        getDashboardMetricsAction(),
+        getOrdersAction({ pageSize: 500 }),
+      ]);
+
       if (res.success && res.data) {
         setMetrics(res.data);
       } else {
         setError(res.error || "تعذر تحميل مؤشرات لوحة التحكم");
+      }
+
+      if (ordersRes.success && ordersRes.data) {
+        setOrders(ordersRes.data.orders);
       }
     } catch {
       setError("حدث خطأ أثناء تحميل البيانات");
@@ -116,7 +130,44 @@ export function DashboardView() {
         </div>
       </div>
 
-      {/* Error Alert */}
+      {/* Main Tab Switcher */}
+      <div className="flex items-center gap-2 border-b border-slate-200 pb-3">
+        <button
+          type="button"
+          onClick={() => setActiveTab("overview")}
+          className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+            activeTab === "overview"
+              ? "bg-slate-900 text-white shadow-sm"
+              : "bg-white text-slate-600 hover:bg-slate-100 border border-slate-200"
+          }`}
+        >
+          <BarChart3 className="w-4 h-4" />
+          <span>نظرة عامة على الطلبات والعمليات</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab("carriers")}
+          className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+            activeTab === "carriers"
+              ? "bg-emerald-600 text-white shadow-sm shadow-emerald-600/20"
+              : "bg-white text-slate-600 hover:bg-slate-100 border border-slate-200"
+          }`}
+        >
+          <Truck className="w-4 h-4 text-emerald-500" />
+          <span>تحليل ومقارنة أداء شركات الشحن</span>
+          <span className="px-1.5 py-0.2 bg-emerald-100 text-emerald-800 rounded text-[10px] font-mono">
+            جديد
+          </span>
+        </button>
+      </div>
+
+      {/* When Carrier Matrix Tab Active */}
+      {activeTab === "carriers" ? (
+        <CarrierAnalyticsDashboard orders={orders} />
+      ) : (
+        <>
+          {/* Error Alert */}
       {error && (
         <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-xs font-semibold flex items-center gap-2">
           <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
@@ -435,6 +486,8 @@ export function DashboardView() {
           )}
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 }

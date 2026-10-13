@@ -18,23 +18,45 @@ import {
   Layers,
   ArrowUpDown,
   Filter,
+  Wallet,
+  ShieldAlert,
+  ChevronDown,
+  Building,
 } from "lucide-react";
-import { Order } from "@/types/database";
-import { formatEgp } from "@/lib/calculations";
+import { Order, DeliveryStatus, SettlementStatus } from "@/types/database";
+import {
+  formatEgp,
+  getDeliveryStatusBadge,
+} from "@/lib/calculations";
+import {
+  calculateCourierSettlementMetrics,
+  CourierSettlementMetrics,
+} from "@/lib/settlementCalculations";
 import {
   getOrdersAction,
   batchUpdateSettlementStatusAction,
 } from "@/app/actions/orders";
+import { SettlementReconciliationModal } from "./SettlementReconciliationModal";
+import { ReturnReceivingModal } from "@/components/returns/ReturnReceivingModal";
+import { CourierAgingRadarView } from "./CourierAgingRadarView";
+
+type SettlementTab = "all" | "delivered_pending" | "in_transit" | "settled" | "returned" | "aging_radar";
 
 export function SettlementsView() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Active view tab
+  const [activeTab, setActiveTab] = useState<SettlementTab>("all");
+
+  // Reconciliation Modal state
+  const [isReconciliationModalOpen, setIsReconciliationModalOpen] = useState(false);
+  const [isReturnReceivingModalOpen, setIsReturnReceivingModalOpen] = useState(false);
+
   // Filters
   const [searchTerm, setSearchTerm] = useState("");
-  const [settlementFilter, setSettlementFilter] = useState<string>("all");
-  const [deliveryFilter, setDeliveryFilter] = useState<string>("all");
+  const [governorate, setGovernorate] = useState("all");
 
   // Selection
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -47,10 +69,8 @@ export function SettlementsView() {
     setError(null);
     try {
       const ordersRes = await getOrdersAction({
-        deliveryStatus: deliveryFilter === "all" ? undefined : deliveryFilter,
-        settlementStatus: settlementFilter === "all" ? undefined : settlementFilter,
         search: searchTerm,
-        pageSize: 300,
+        pageSize: 400,
       });
 
       if (ordersRes.success && ordersRes.data) {
@@ -63,58 +83,54 @@ export function SettlementsView() {
     } finally {
       setLoading(false);
     }
-  }, [deliveryFilter, settlementFilter, searchTerm]);
+  }, [searchTerm]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
 
-  // Prevent double counting: compute metrics accurately from the loaded unique orders
-  const metrics = useMemo(() => {
-    const seenIds = new Set<string>();
-    let totalOrderValue = 0;
-    let totalShippingCost = 0;
-    let netDueToUs = 0; // Total COD amount to be collected
-    let settledAmount = 0;
-    let pendingAmount = 0;
-    let ordersCount = 0;
-
-    for (const ord of orders) {
-      if (seenIds.has(ord.id)) continue;
-      seenIds.add(ord.id);
-      ordersCount++;
-
-      const orderTotal = Number(ord.order_total || 0);
-      const shippingCost = Number(ord.shipping_cost || 0);
-      const codAmount = Number(ord.cod_amount || 0);
-
-      totalOrderValue += orderTotal;
-      totalShippingCost += shippingCost;
-      netDueToUs += codAmount;
-
-      if (ord.settlement_status === "settled") {
-        settledAmount += codAmount;
-      } else {
-        pendingAmount += codAmount;
-      }
-    }
-
-    return {
-      totalOrderValue,
-      totalShippingCost,
-      netDueToUs,
-      settledAmount,
-      pendingAmount,
-      ordersCount,
-    };
+  // Overall settlement metrics computed from all active orders
+  const metrics: CourierSettlementMetrics = useMemo(() => {
+    return calculateCourierSettlementMetrics(orders);
   }, [orders]);
+
+  // Filter orders according to active tab, governorate, and search term
+  const filteredOrders = useMemo(() => {
+    return orders.filter((order) => {
+      // Tab filter
+      if (activeTab === "delivered_pending") {
+        if (order.delivery_status !== "delivered" || order.settlement_status === "settled") {
+          return false;
+        }
+      } else if (activeTab === "in_transit") {
+        if (order.delivery_status !== "handed_to_carrier" || order.settlement_status === "settled") {
+          return false;
+        }
+      } else if (activeTab === "settled") {
+        if (order.settlement_status !== "settled") {
+          return false;
+        }
+      } else if (activeTab === "returned") {
+        if (order.delivery_status !== "returned") {
+          return false;
+        }
+      }
+
+      // Governorate filter
+      if (governorate !== "all" && order.governorate !== governorate) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [orders, activeTab, governorate]);
 
   // Selection helpers
   const toggleSelectAll = () => {
-    if (selectedIds.length === orders.length && orders.length > 0) {
+    if (selectedIds.length === filteredOrders.length && filteredOrders.length > 0) {
       setSelectedIds([]);
     } else {
-      setSelectedIds(orders.map((o) => o.id));
+      setSelectedIds(filteredOrders.map((o) => o.id));
     }
   };
 
@@ -125,7 +141,7 @@ export function SettlementsView() {
   };
 
   // Settle or Revert Settlement Action
-  const handleUpdateSettlement = (ids: string[], status: "settled" | "pending") => {
+  const handleUpdateSettlement = (ids: string[], status: SettlementStatus) => {
     if (ids.length === 0) return;
     startTransition(async () => {
       const res = await batchUpdateSettlementStatusAction(ids, status);
@@ -161,10 +177,15 @@ export function SettlementsView() {
   };
 
   const handleExportSelected = () => {
-    const ids = selectedIds.length > 0 ? selectedIds : orders.map((o) => o.id);
+    const ids = selectedIds.length > 0 ? selectedIds : filteredOrders.map((o) => o.id);
     if (ids.length === 0) return;
     window.location.href = `/api/orders/export?ids=${ids.join(",")}`;
   };
+
+  const selectedOrders = filteredOrders.filter((o) => selectedIds.includes(o.id));
+  const selectedCod = selectedOrders.reduce((sum, o) => sum + (o.cod_amount || 0), 0);
+  const selectedShipping = selectedOrders.reduce((sum, o) => sum + (o.shipping_cost || 0), 0);
+  const selectedNet = selectedCod - selectedShipping;
 
   return (
     <div className="space-y-6">
@@ -173,14 +194,14 @@ export function SettlementsView() {
         <div>
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-black text-slate-900 tracking-tight">
-              المستحقات والتسويات | Shipping Settlements
+              حاسبة مستحقات شركات الشحن والرصيد المعلق
             </h1>
             <span className="px-2.5 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 text-xs font-bold rounded-full">
-              حسابات شركة الشحن
+              حسابات وعهدة الشحن
             </span>
           </div>
-          <p className="text-xs sm:text-sm text-slate-500 mt-1">
-            متابعة الأموال المستحقة لدى شركة الشحن، مبالغ التحصيل (COD)، وصافي المستحقات المسواة والمعلقة.
+          <p className="text-xs sm:text-sm text-slate-500 mt-1 font-medium">
+            متابعة دقيقة لأموالك المعلقة في السوق: التحصيلات النقدية (COD)، مصاريف الشحن المخصومة، وصافي المستحق الفعلي لك.
           </p>
         </div>
 
@@ -196,123 +217,132 @@ export function SettlementsView() {
           </button>
 
           <button
+            onClick={() => setIsReconciliationModalOpen(true)}
+            className="h-10 px-4 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl inline-flex items-center gap-2 shadow-md shadow-blue-600/20 transition-all"
+            title="مطابقة كشف تسوية شركة الشحن Excel وكشف الفروقات"
+          >
+            <Layers className="w-4 h-4" />
+            <span>مطابقة كشف تسوية شركة الشحن</span>
+          </button>
+
+          <button
+            onClick={() => setIsReturnReceivingModalOpen(true)}
+            className="h-10 px-4 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl inline-flex items-center gap-2 shadow-md shadow-rose-600/20 transition-all"
+            title="فحص واستلام المرتجعات بالمخزن وحماية العهدة المفقودة"
+          >
+            <RotateCcw className="w-4 h-4" />
+            <span>فحص واستلام المرتجعات بالمخزن</span>
+          </button>
+
+          <button
             onClick={handleExportPending}
             className="h-10 px-4 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl inline-flex items-center gap-2 shadow-md shadow-emerald-600/20 transition-all"
           >
             <FileSpreadsheet className="w-4 h-4" />
-            <span>تصدير كشف المستحقات المعلقة (Excel)</span>
+            <span>تصدير كشف المستحقات (Excel)</span>
           </button>
         </div>
       </div>
 
-      {/* KPI Cards Grid - The 6 Core Metrics Required */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {/* 1. Total Orders Value */}
-        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+      {/* Primary KPI Cards Grid - The Accurate Courier Financial Formula */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* 1. Confirmed Payout Due to You (Delivered & Pending) */}
+        <div className="bg-white p-5 rounded-2xl border-2 border-emerald-500/30 bg-gradient-to-br from-emerald-50/20 to-white shadow-sm relative overflow-hidden">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-500">إجمالي قيمة الأوردرات</span>
-            <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center font-bold">
-              <DollarSign className="w-5 h-5" />
+            <span className="text-xs font-black text-emerald-950">
+              الصافي المؤكد بانتظار التوريد
+            </span>
+            <div className="w-9 h-9 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold">
+              <Wallet className="w-5 h-5" />
             </div>
           </div>
           <div className="mt-3">
-            <span className="text-2xl font-black text-slate-900">
-              {formatEgp(metrics.totalOrderValue)}
+            <span className="text-2xl font-black text-emerald-700 font-mono">
+              {formatEgp(metrics.deliveredPendingNet)}
             </span>
           </div>
-          <p className="text-[11px] text-slate-400 mt-2">
-            مجموع أسعار المنتجات لجميع شحنات المستحقات
+          <p className="text-[11px] text-slate-500 mt-2 font-medium">
+            شحنات تم تسليمها للعملاء ({metrics.deliveredPendingCount} شحنة) بعد خصم الشحن
           </p>
+          <div className="mt-1 text-[10px] text-slate-400 font-mono">
+            تحصيل: {formatEgp(metrics.deliveredPendingCod)} | شحن: {formatEgp(metrics.deliveredPendingShippingCost)}
+          </div>
         </div>
 
-        {/* 2. Total Shipping Cost */}
-        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+        {/* 2. Floating Cash in Market (In-Transit with Couriers) */}
+        <div className="bg-white p-5 rounded-2xl border border-amber-300 bg-gradient-to-br from-amber-50/20 to-white shadow-sm">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-500">إجمالي قيمة الشحن</span>
-            <div className="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-700 flex items-center justify-center font-bold">
+            <span className="text-xs font-black text-amber-950">
+              أموال في السوق مع المناديب
+            </span>
+            <div className="w-9 h-9 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center font-bold">
               <Truck className="w-5 h-5" />
             </div>
           </div>
           <div className="mt-3">
-            <span className="text-2xl font-black text-indigo-700">
-              {formatEgp(metrics.totalShippingCost)}
+            <span className="text-2xl font-black text-amber-700 font-mono">
+              {formatEgp(metrics.inTransitCod)}
             </span>
           </div>
-          <p className="text-[11px] text-slate-400 mt-2">
-            تكاليف الشحن المحسوبة حسب المحافظات
+          <p className="text-[11px] text-slate-500 mt-2 font-medium">
+            شحنات قيد التوصيل في الشارع ({metrics.inTransitCount} شحنة)
           </p>
+          <div className="mt-1 text-[10px] text-slate-400 font-mono">
+            تكاليف شحنها المتوقعة: {formatEgp(metrics.inTransitShippingCost)}
+          </div>
         </div>
 
-        {/* 3. Net Due to Us */}
-        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm bg-gradient-to-br from-white to-blue-50/40">
+        {/* 3. Settled & Transferred (المبالغ المسواة فعلياً) */}
+        <div className="bg-white p-5 rounded-2xl border border-blue-200 bg-gradient-to-br from-blue-50/20 to-white shadow-sm">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-blue-900">صافي المستحق لنا (COD)</span>
-            <div className="w-10 h-10 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center font-bold">
-              <TrendingUp className="w-5 h-5" />
-            </div>
-          </div>
-          <div className="mt-3">
-            <span className="text-2xl font-black text-blue-700">
-              {formatEgp(metrics.netDueToUs)}
+            <span className="text-xs font-black text-blue-950">
+              المبالغ المسواة والمستلمة
             </span>
-          </div>
-          <p className="text-[11px] text-slate-500 mt-2">
-            إجمالي المبالغ المطلوب تحصيلها من العملاء
-          </p>
-        </div>
-
-        {/* 4. Settled Amounts */}
-        <div className="bg-white p-5 rounded-2xl border border-emerald-200 shadow-sm bg-gradient-to-br from-white to-emerald-50/30">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-emerald-800">المبالغ التي تم تحصيلها / تسويتها</span>
-            <div className="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold">
+            <div className="w-9 h-9 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center font-bold">
               <CheckCircle2 className="w-5 h-5" />
             </div>
           </div>
           <div className="mt-3">
-            <span className="text-2xl font-black text-emerald-700">
-              {formatEgp(metrics.settledAmount)}
+            <span className="text-2xl font-black text-blue-800 font-mono">
+              {formatEgp(metrics.settledNet)}
             </span>
           </div>
-          <p className="text-[11px] text-slate-500 mt-2">
-            تم توريدها واستلامها من شركة الشحن
+          <p className="text-[11px] text-slate-500 mt-2 font-medium">
+            تم توريدها واستلامها بالكامل ({metrics.settledCount} شحنة)
           </p>
+          <div className="mt-1 text-[10px] text-slate-400 font-mono">
+            إجمالي COD: {formatEgp(metrics.settledCod)} | شحن: {formatEgp(metrics.settledShippingCost)}
+          </div>
         </div>
 
-        {/* 5. Pending Amounts */}
-        <div className="bg-white p-5 rounded-2xl border border-rose-300 shadow-sm bg-gradient-to-br from-white to-rose-50/40">
+        {/* 4. Returns Shipping Loss / Deductions */}
+        <div className="bg-white p-5 rounded-2xl border border-rose-200 bg-gradient-to-br from-rose-50/20 to-white shadow-sm">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-rose-800">المبالغ التي ما زالت مستحقة (معلقة)</span>
-            <div className="w-10 h-10 rounded-xl bg-rose-100 text-rose-600 flex items-center justify-center font-bold">
-              <AlertCircle className="w-5 h-5" />
+            <span className="text-xs font-black text-rose-950">
+              مصاريف شحن المرتجعات المخصومة
+            </span>
+            <div className="w-9 h-9 rounded-xl bg-rose-100 text-rose-700 flex items-center justify-center font-bold">
+              <ShieldAlert className="w-5 h-5" />
             </div>
           </div>
           <div className="mt-3">
-            <span className="text-2xl font-black text-rose-600">
-              {formatEgp(metrics.pendingAmount)}
+            <span className="text-2xl font-black text-rose-700 font-mono">
+              {formatEgp(metrics.returnsShippingCost)}
             </span>
           </div>
-          <p className="text-[11px] text-slate-500 mt-2">
-            مستحقات بانتظار التوريد والتسوية من الشركة
+          <p className="text-[11px] text-slate-500 mt-2 font-medium">
+            عدد ({metrics.returnsCount}) طرد مرتجع تخصم شركته تكلفة شحنه
           </p>
-        </div>
-
-        {/* 6. Linked Orders Count */}
-        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-500">عدد الأوردرات المرتبطة بالمستحقات</span>
-            <div className="w-10 h-10 rounded-xl bg-purple-50 text-purple-700 flex items-center justify-center font-bold">
-              <Layers className="w-5 h-5" />
-            </div>
+          <div className="mt-2 pt-2 border-t border-rose-100 flex items-center justify-between">
+            <span className="text-[10px] text-slate-400">تخصم من دفعات التحصيل</span>
+            <button
+              type="button"
+              onClick={() => setIsReturnReceivingModalOpen(true)}
+              className="text-[11px] text-rose-700 hover:text-rose-900 font-bold underline cursor-pointer"
+            >
+              فحص المخزن ←
+            </button>
           </div>
-          <div className="mt-3">
-            <span className="text-2xl font-black text-purple-800">
-              {metrics.ordersCount} أوردر
-            </span>
-          </div>
-          <p className="text-[11px] text-slate-400 mt-2">
-            لا يتم احتساب أي أوردر محذوف أو مكرر مرتين
-          </p>
         </div>
       </div>
 
@@ -331,19 +361,105 @@ export function SettlementsView() {
         </div>
       )}
 
-      {/* Detailed Orders Table Section */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm space-y-4 p-5">
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-          <div>
-            <h3 className="text-base font-bold text-slate-900">
-              تفاصيل الأوردرات ومستحقات الشحن
-            </h3>
-            <p className="text-xs text-slate-500 mt-0.5">
-              كشف تفصيلي بالأوردرات المكونة للمبالغ، مع تفاصيل العميل، المحافظة، الشحن، وحالة التسوية
-            </p>
-          </div>
+      {/* View Tabs & Filters Bar */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 space-y-4">
+        {/* Interactive Tabs */}
+        <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 pb-3">
+          <button
+            type="button"
+            onClick={() => setActiveTab("all")}
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+              activeTab === "all"
+                ? "bg-slate-900 text-white shadow-sm"
+                : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+            }`}
+          >
+            <span>كل الشحنات</span>
+            <span className="px-1.5 py-0.2 bg-white/20 rounded text-[10px]">
+              {orders.length}
+            </span>
+          </button>
 
-          {/* Filters Bar */}
+          <button
+            type="button"
+            onClick={() => setActiveTab("delivered_pending")}
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+              activeTab === "delivered_pending"
+                ? "bg-emerald-600 text-white shadow-sm"
+                : "bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border border-emerald-200"
+            }`}
+          >
+            <CheckCircle2 className="w-3.5 h-3.5" />
+            <span>مستحقات مؤكدة بانتظار التوريد</span>
+            <span className="px-1.5 py-0.2 bg-white/20 rounded text-[10px]">
+              {metrics.deliveredPendingCount}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab("in_transit")}
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+              activeTab === "in_transit"
+                ? "bg-amber-600 text-white shadow-sm"
+                : "bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200"
+            }`}
+          >
+            <Truck className="w-3.5 h-3.5" />
+            <span>قيد الشحن في السوق</span>
+            <span className="px-1.5 py-0.2 bg-white/20 rounded text-[10px]">
+              {metrics.inTransitCount}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab("settled")}
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+              activeTab === "settled"
+                ? "bg-blue-600 text-white shadow-sm"
+                : "bg-blue-50 text-blue-800 hover:bg-blue-100 border border-blue-200"
+            }`}
+          >
+            <CheckCircle className="w-3.5 h-3.5" />
+            <span>تمت التسوية بنجاح</span>
+            <span className="px-1.5 py-0.2 bg-white/20 rounded text-[10px]">
+              {metrics.settledCount}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab("returned")}
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+              activeTab === "returned"
+                ? "bg-rose-600 text-white shadow-sm"
+                : "bg-rose-50 text-rose-800 hover:bg-rose-100 border border-rose-200"
+            }`}
+          >
+            <ShieldAlert className="w-3.5 h-3.5" />
+            <span>المرتجعات ومصاريفها</span>
+            <span className="px-1.5 py-0.2 bg-white/20 rounded text-[10px]">
+              {metrics.returnsCount}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab("aging_radar")}
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+              activeTab === "aging_radar"
+                ? "bg-amber-600 text-white shadow-sm"
+                : "bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200"
+            }`}
+          >
+            <Clock className="w-3.5 h-3.5 text-amber-500" />
+            <span>رادار تقادم الديون 🚨</span>
+          </button>
+        </div>
+
+        {/* Filter Bar */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-2.5">
             {/* Search */}
             <div className="relative">
@@ -353,43 +469,40 @@ export function SettlementsView() {
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 placeholder="ابحث بالاسم، الهاتف، الكود..."
-                className="pr-8 pl-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                className="pr-8 pl-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20"
               />
             </div>
 
-            {/* Delivery filter */}
+            {/* Governorate filter */}
             <select
-              value={deliveryFilter}
-              onChange={(e) => setDeliveryFilter(e.target.value)}
-              className="px-2.5 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg font-medium text-slate-700"
+              value={governorate}
+              onChange={(e) => setGovernorate(e.target.value)}
+              className="px-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-xl font-medium text-slate-700"
             >
-              <option value="all">كل حالات التوصيل</option>
-              <option value="delivered">تم التوصيل للعميل</option>
-              <option value="handed_to_carrier">مع شركة الشحن</option>
-              <option value="returned">مرتجع</option>
-              <option value="new">أوردر جديد</option>
+              <option value="all">كل المحافظات</option>
+              {metrics.byGovernorate.map((g) => (
+                <option key={g.governorate} value={g.governorate}>
+                  {g.governorate} ({g.count})
+                </option>
+              ))}
             </select>
+          </div>
 
-            {/* Settlement filter */}
-            <select
-              value={settlementFilter}
-              onChange={(e) => setSettlementFilter(e.target.value)}
-              className="px-2.5 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg font-medium text-slate-700"
-            >
-              <option value="all">كل حالات التسوية</option>
-              <option value="pending">معلق (غير مسوى)</option>
-              <option value="settled">تمت التسوية والتوريد</option>
-            </select>
+          <div className="text-xs text-slate-500 font-medium">
+            عرض <strong className="text-slate-900">{filteredOrders.length}</strong> شحنة
           </div>
         </div>
 
         {/* Bulk Action Bar */}
         {selectedIds.length > 0 && (
-          <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl flex flex-wrap items-center justify-between gap-3 animate-in fade-in duration-150">
+          <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl flex flex-wrap items-center justify-between gap-3 animate-in fade-in duration-150 shadow-sm">
             <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-blue-600 animate-pulse"></span>
-              <span className="text-xs font-bold text-blue-900">
-                تم تحديد {selectedIds.length} شحنة
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-600 animate-pulse"></span>
+              <span className="text-xs font-bold text-emerald-950">
+                تم تحديد <strong className="font-black">{selectedIds.length}</strong> شحنة
+                {" | "}
+                صافي التحصيل المستحق: <strong className="font-black font-mono text-emerald-900">{formatEgp(selectedNet)}</strong>
+                {" (COD: "}{formatEgp(selectedCod)}{" - شحن: "}{formatEgp(selectedShipping)}{")"}
               </span>
             </div>
 
@@ -400,7 +513,7 @@ export function SettlementsView() {
                 className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition-colors flex items-center gap-1.5 shadow-sm disabled:opacity-50"
               >
                 <CheckCircle className="w-3.5 h-3.5" />
-                <span>تأكيد التسوية واستلام النقدية ({selectedIds.length})</span>
+                <span>تأكيد استلام وتسوية المحدد ({selectedIds.length})</span>
               </button>
 
               <button
@@ -417,12 +530,12 @@ export function SettlementsView() {
                 className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-bold rounded-lg transition-colors flex items-center gap-1.5 shadow-sm"
               >
                 <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
-                <span>تصدير Excel للمحدد</span>
+                <span>تصدير Excel</span>
               </button>
 
               <button
                 onClick={() => setSelectedIds([])}
-                className="text-xs text-slate-500 hover:text-slate-800 px-2 py-1 font-medium"
+                className="text-xs text-slate-500 hover:text-slate-800 px-2 py-1 font-bold"
               >
                 إلغاء التحديد
               </button>
@@ -430,17 +543,20 @@ export function SettlementsView() {
           </div>
         )}
 
-        {/* Detailed Table */}
-        <div className="border border-slate-200 rounded-xl overflow-hidden overflow-x-auto">
-          {loading ? (
-            <div className="py-16 text-center">
-              <RefreshCw className="w-6 h-6 text-blue-600 animate-spin mx-auto mb-2" />
-              <p className="text-xs text-slate-500">جاري تحميل كشف المستحقات...</p>
-            </div>
-          ) : orders.length === 0 ? (
-            <div className="py-12 text-center text-slate-400 text-xs">
-              لا توجد شحنات مطابقة للفلاتر الحالية.
-            </div>
+        {/* Content Section: Aging Radar View vs Orders Table */}
+        {activeTab === "aging_radar" ? (
+          <CourierAgingRadarView />
+        ) : (
+          <div className="border border-slate-200 rounded-xl overflow-hidden overflow-x-auto">
+            {loading ? (
+              <div className="py-16 text-center">
+                <RefreshCw className="w-6 h-6 text-blue-600 animate-spin mx-auto mb-2" />
+                <p className="text-xs text-slate-500 font-medium">جاري احتساب كشف المستحقات...</p>
+              </div>
+            ) : filteredOrders.length === 0 ? (
+              <div className="py-12 text-center text-slate-400 text-xs">
+                لا توجد شحنات مطابقة للفلاتر الحالية.
+              </div>
           ) : (
             <table className="w-full text-right text-xs">
               <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold">
@@ -448,33 +564,37 @@ export function SettlementsView() {
                   <th className="p-3 w-10 text-center">
                     <input
                       type="checkbox"
-                      checked={selectedIds.length === orders.length && orders.length > 0}
+                      checked={
+                        selectedIds.length === filteredOrders.length &&
+                        filteredOrders.length > 0
+                      }
                       onChange={toggleSelectAll}
                       className="w-3.5 h-3.5 text-blue-600 rounded cursor-pointer"
                     />
                   </th>
-                  <th className="p-3">Order ID</th>
-                  <th className="p-3">اسم العميل</th>
-                  <th className="p-3">المحافظة</th>
-                  <th className="p-3">قيمة الأوردر</th>
-                  <th className="p-3">سعر الشحن</th>
-                  <th className="p-3">صافي المستحق (COD)</th>
-                  <th className="p-3">حالة الأوردر</th>
-                  <th className="p-3">حالة التسوية المالية</th>
-                  <th className="p-3">تاريخ الأوردر</th>
+                  <th className="p-3">كود الأوردر</th>
+                  <th className="p-3">المستلم والمحافظة</th>
+                  <th className="p-3">حالة الشحن والتسليم</th>
+                  <th className="p-3">قيمة التحصيل (COD)</th>
+                  <th className="p-3">تكلفة الشحن</th>
+                  <th className="p-3">الصافي لك من الشركة</th>
+                  <th className="p-3">حالة التسوية والتوريد</th>
+                  <th className="p-3">التاريخ</th>
                   <th className="p-3 text-center">إجراء فوري</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {orders.map((ord) => {
+                {filteredOrders.map((ord) => {
                   const isSelected = selectedIds.includes(ord.id);
                   const isSettled = ord.settlement_status === "settled";
+                  const netToMerchant = Number(ord.cod_amount || 0) - Number(ord.shipping_cost || 0);
+                  const deliveryBadge = getDeliveryStatusBadge(ord.delivery_status);
 
                   return (
                     <tr
                       key={ord.id}
                       className={`hover:bg-slate-50/80 transition-colors ${
-                        isSelected ? "bg-blue-50/40" : ""
+                        isSelected ? "bg-emerald-50/40" : ""
                       }`}
                     >
                       <td className="p-3 text-center">
@@ -487,86 +607,85 @@ export function SettlementsView() {
                       </td>
 
                       {/* Order ID */}
-                      <td className="p-3 font-mono font-bold text-slate-800">
+                      <td className="p-3 font-mono font-bold text-slate-900">
                         #{ord.id.slice(0, 8).toUpperCase()}
                       </td>
 
-                      {/* Customer Name & Phone */}
+                      {/* Customer & Governorate */}
                       <td className="p-3">
-                        <span className="font-bold text-slate-900 block">
-                          {ord.customer_name}
-                        </span>
-                        <span className="text-[10px] text-slate-400 font-mono block mt-0.5" dir="ltr">
+                        <div className="flex items-center gap-1.5 mb-0.5">
+                          <span className="font-bold text-slate-900">
+                            {ord.customer_name}
+                          </span>
+                          <span className="px-1.5 py-0.2 bg-slate-100 rounded text-[10px] font-bold text-slate-700">
+                            {ord.governorate}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-slate-500 font-mono block" dir="ltr">
                           {ord.phone_primary}
                         </span>
                       </td>
 
-                      {/* Governorate */}
-                      <td className="p-3 font-semibold text-slate-700">
-                        <span className="px-2 py-0.5 bg-slate-100 rounded text-[11px] font-bold">
-                          {ord.governorate}
+                      {/* Delivery Status Badge */}
+                      <td className="p-3 whitespace-nowrap">
+                        <span
+                          className={`inline-block px-2 py-0.5 text-[11px] font-bold rounded-lg border ${deliveryBadge.bgClass} ${deliveryBadge.textClass}`}
+                        >
+                          {deliveryBadge.label}
                         </span>
                       </td>
 
-                      {/* Order Total */}
-                      <td className="p-3 font-bold text-slate-900 whitespace-nowrap">
-                        {formatEgp(ord.order_total)}
-                      </td>
-
-                      {/* Shipping Cost */}
-                      <td className="p-3 text-slate-600 whitespace-nowrap">
-                        {formatEgp(ord.shipping_cost)}
-                      </td>
-
-                      {/* Net Due / COD Amount */}
-                      <td className="p-3 font-black text-blue-700 whitespace-nowrap">
+                      {/* Gross COD */}
+                      <td className="p-3 font-bold text-slate-900 whitespace-nowrap font-mono">
                         {ord.cod_amount === 0 ? (
-                          <span className="text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded text-xs font-bold">
-                            مدفوع بالكامل
-                          </span>
+                          <span className="text-emerald-700 text-[11px]">مدفوع (0)</span>
                         ) : (
                           formatEgp(ord.cod_amount)
                         )}
                       </td>
 
-                      {/* Delivery Status */}
-                      <td className="p-3 whitespace-nowrap">
-                        {ord.delivery_status === "delivered" ? (
-                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded">
-                            <CheckCircle2 className="w-3 h-3" />
-                            تم التوصيل
-                          </span>
-                        ) : ord.delivery_status === "handed_to_carrier" ? (
-                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded">
-                            <Truck className="w-3 h-3" />
-                            مع شركة الشحن
-                          </span>
-                        ) : ord.delivery_status === "returned" ? (
-                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-700 bg-rose-50 px-2 py-0.5 rounded">
-                            مرتجع
-                          </span>
-                        ) : (
-                          <span className="text-slate-500 text-[11px] font-medium">جديد</span>
-                        )}
+                      {/* Shipping Cost */}
+                      <td className="p-3 text-slate-600 whitespace-nowrap font-mono text-[11px]">
+                        {formatEgp(ord.shipping_cost)}
+                      </td>
+
+                      {/* Net Receivable to Merchant */}
+                      <td className="p-3 whitespace-nowrap font-mono">
+                        <span
+                          className={`font-black text-sm ${
+                            netToMerchant > 0
+                              ? "text-emerald-700"
+                              : netToMerchant < 0
+                              ? "text-rose-700"
+                              : "text-slate-600"
+                          }`}
+                        >
+                          {formatEgp(netToMerchant)}
+                        </span>
                       </td>
 
                       {/* Settlement Status */}
                       <td className="p-3 whitespace-nowrap">
                         {isSettled ? (
-                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
-                            <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                            تمت التسوية والتوريد
+                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-blue-700 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded">
+                            <CheckCircle2 className="w-3 h-3 text-blue-600" />
+                            تم التوريد والتسوية
+                          </span>
+                        ) : ord.delivery_status === "delivered" ? (
+                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-300 px-2 py-0.5 rounded">
+                            <AlertCircle className="w-3 h-3 text-emerald-600" />
+                            جاهز للصرف والتوريد
                           </span>
                         ) : (
-                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded">
-                            <AlertCircle className="w-3 h-3 text-rose-600" />
-                            معلق عند شركة الشحن
+                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
+                            <Clock className="w-3 h-3 text-amber-600" />
+                            معلق في السوق
                           </span>
                         )}
                       </td>
 
-                      {/* Order Date */}
-                      <td className="p-3 text-slate-500 font-mono text-[11px] whitespace-nowrap">
+                      {/* Date */}
+                      <td className="p-3 text-slate-400 font-mono text-[11px] whitespace-nowrap">
                         {ord.order_date}
                       </td>
 
@@ -587,7 +706,7 @@ export function SettlementsView() {
                             disabled={isPending}
                             className="px-2.5 py-1 text-[10px] font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-sm transition-colors cursor-pointer"
                           >
-                            تسوية الآن
+                            تسوية واستلام
                           </button>
                         )}
                       </td>
@@ -598,7 +717,25 @@ export function SettlementsView() {
             </table>
           )}
         </div>
-      </div>
+      )}
+    </div>
+
+      {/* Carrier Settlement Reconciliation Modal */}
+      <SettlementReconciliationModal
+        isOpen={isReconciliationModalOpen}
+        onClose={() => setIsReconciliationModalOpen(false)}
+        systemOrders={orders}
+        onReconciliationApplied={() => fetchData()}
+      />
+
+      {/* Return Receiving & Custody Audit Modal */}
+      <ReturnReceivingModal
+        isOpen={isReturnReceivingModalOpen}
+        onClose={() => setIsReturnReceivingModalOpen(false)}
+        orders={orders}
+        onRefresh={() => fetchData()}
+      />
     </div>
   );
 }
+

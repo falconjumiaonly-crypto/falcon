@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { generateOrdersExcelBuffer, generateCarrierSettlementExcelBuffer } from "@/lib/excel";
+import {
+  generateOrdersExcelBuffer,
+  generateCarrierSettlementExcelBuffer,
+  generateCarrierOrdersExcelBuffer,
+  CARRIER_TEMPLATES,
+  CarrierType,
+} from "@/lib/excel";
 import { Order } from "@/types/database";
 
 export async function GET(request: NextRequest) {
@@ -17,7 +23,17 @@ export async function GET(request: NextRequest) {
 
     const { searchParams } = new URL(request.url);
     const type = searchParams.get("type"); // 'carrier_settlement' | 'standard'
+    const rawCarrier = searchParams.get("carrier") as CarrierType | null;
     const rawIds = searchParams.get("ids");
+    const updateStatusToHanded =
+      searchParams.get("updateStatus") === "true" || searchParams.get("updateStatus") === "1";
+
+    let carrier: CarrierType = "standard";
+    if (type === "carrier_settlement") {
+      carrier = "carrier_settlement";
+    } else if (rawCarrier && CARRIER_TEMPLATES[rawCarrier]) {
+      carrier = rawCarrier;
+    }
 
     let query = supabase
       .from("orders")
@@ -25,8 +41,7 @@ export async function GET(request: NextRequest) {
       .is("deleted_at", null)
       .order("created_at", { ascending: false });
 
-    if (type === "carrier_settlement") {
-      // Only delivered orders with pending settlement
+    if (carrier === "carrier_settlement") {
       query = query.eq("delivery_status", "delivered").eq("settlement_status", "pending");
     } else if (rawIds) {
       const ids = rawIds.split(",").map((s) => s.trim()).filter(Boolean);
@@ -43,16 +58,21 @@ export async function GET(request: NextRequest) {
     const orderList = (orders || []) as Order[];
     const todayStr = new Date().toISOString().split("T")[0];
 
-    let excelBuffer: Uint8Array;
-    let fileName: string;
-
-    if (type === "carrier_settlement") {
-      excelBuffer = generateCarrierSettlementExcelBuffer(orderList);
-      fileName = `Falcon_Pending_Carrier_Settlements_${todayStr}.xlsx`;
-    } else {
-      excelBuffer = generateOrdersExcelBuffer(orderList, "الطلبات");
-      fileName = `Falcon_Orders_${todayStr}.xlsx`;
+    // Auto-update to 'handed_to_carrier' if requested
+    if (updateStatusToHanded && orderList.length > 0) {
+      const idsToUpdate = orderList.map((o) => o.id);
+      await (supabase
+        .from("orders") as any)
+        .update({
+          delivery_status: "handed_to_carrier",
+          updated_at: new Date().toISOString(),
+        })
+        .in("id", idsToUpdate);
     }
+
+    const templateInfo = CARRIER_TEMPLATES[carrier];
+    const excelBuffer = generateCarrierOrdersExcelBuffer(orderList, carrier);
+    const fileName = `${templateInfo.filePrefix}_${todayStr}.xlsx`;
 
     return new NextResponse(Buffer.from(excelBuffer), {
       status: 200,
@@ -88,6 +108,8 @@ export async function POST(request: NextRequest) {
     const {
       mode = "filtered", // 'selected' | 'filtered' | 'all'
       exportType = "standard", // 'standard' | 'carrier_settlement'
+      carrier: requestedCarrier = "standard", // 'bosta' | 'jt' | 'aramex' | 'mylerz' | 'standard'
+      updateStatusToHanded = false,
       selectedIds = [],
       search = "",
       printStatus = "",
@@ -96,9 +118,17 @@ export async function POST(request: NextRequest) {
       paymentStatus = "",
       startDate = "",
       endDate = "",
-      sheetName = "الطلبات",
-      fileNamePrefix = "Falcon_Orders",
+      sheetName,
+      fileNamePrefix,
+      options,
     } = body;
+
+    let carrier: CarrierType = "standard";
+    if (exportType === "carrier_settlement") {
+      carrier = "carrier_settlement";
+    } else if (requestedCarrier && CARRIER_TEMPLATES[requestedCarrier as CarrierType]) {
+      carrier = requestedCarrier as CarrierType;
+    }
 
     let query = supabase
       .from("orders")
@@ -106,7 +136,7 @@ export async function POST(request: NextRequest) {
       .is("deleted_at", null)
       .order("created_at", { ascending: false });
 
-    if (exportType === "carrier_settlement") {
+    if (carrier === "carrier_settlement") {
       query = query.eq("delivery_status", "delivered").eq("settlement_status", "pending");
     } else if (mode === "selected" && Array.isArray(selectedIds) && selectedIds.length > 0) {
       query = query.in("id", selectedIds);
@@ -149,23 +179,28 @@ export async function POST(request: NextRequest) {
     const orderList = (orders || []) as Order[];
     const todayStr = new Date().toISOString().split("T")[0];
 
-    let excelBuffer: Uint8Array;
-    let fileName: string;
-
-    if (exportType === "carrier_settlement") {
-      excelBuffer = generateCarrierSettlementExcelBuffer(orderList);
-      fileName = `Falcon_Pending_Carrier_Settlements_${todayStr}.xlsx`;
-    } else {
-      excelBuffer = generateOrdersExcelBuffer(orderList, sheetName);
-      fileName = `${fileNamePrefix}_${todayStr}.xlsx`;
+    // Automatically mark exported orders as handed to courier if requested!
+    if (updateStatusToHanded && orderList.length > 0) {
+      const idsToUpdate = orderList.map((o) => o.id);
+      await (supabase
+        .from("orders") as any)
+        .update({
+          delivery_status: "handed_to_carrier",
+          updated_at: new Date().toISOString(),
+        })
+        .in("id", idsToUpdate);
     }
+
+    const templateInfo = CARRIER_TEMPLATES[carrier];
+    const excelBuffer = generateCarrierOrdersExcelBuffer(orderList, carrier, options);
+    const finalFileName = `${fileNamePrefix || templateInfo.filePrefix}_${todayStr}.xlsx`;
 
     return new NextResponse(Buffer.from(excelBuffer), {
       status: 200,
       headers: {
         "Content-Type":
           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "Content-Disposition": `attachment; filename="${fileName}"`,
+        "Content-Disposition": `attachment; filename="${finalFileName}"`,
       },
     });
   } catch (err: unknown) {

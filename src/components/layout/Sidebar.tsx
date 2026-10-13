@@ -6,6 +6,7 @@ import {
   LayoutDashboard,
   PlusCircle,
   Package,
+  Boxes,
   FileSpreadsheet,
   Printer,
   CheckCircle2,
@@ -37,6 +38,11 @@ const navItems = [
     name: "الطلبات",
     href: "/orders",
     icon: Package,
+  },
+  {
+    name: "المخزون والعهدة",
+    href: "/inventory",
+    icon: Boxes,
   },
   {
     name: "استيراد Excel",
