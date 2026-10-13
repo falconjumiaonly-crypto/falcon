@@ -50,6 +50,16 @@ export function sanitizeEgyptianPhone(raw: string): string {
 }
 
 /**
+ * Convert Eastern Arabic / Hindi digits (٠-٩) and Persian digits (۰-۹) to standard Western digits (0-9)
+ */
+export function convertArabicDigitsToEnglish(text: string): string {
+  if (!text) return "";
+  return text
+    .replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)))
+    .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)));
+}
+
+/**
  * Smart Order Text Parser
  * Intelligently extracts structured order fields from messy messages (WhatsApp, Facebook, DMs, SMS)
  */
@@ -80,7 +90,8 @@ export function parseOrderText(
     };
   }
 
-  const cleanRaw = rawText.trim();
+  // Normalize Eastern Arabic numerals to standard 0-9 digits upfront
+  const cleanRaw = convertArabicDigitsToEnglish(rawText).trim();
   const lines = cleanRaw
     .split(/\r?\n/)
     .map((l) => l.trim())
@@ -97,6 +108,11 @@ export function parseOrderText(
   let important_notes = "";
   let items_summary = "";
 
+  let explicit_total = 0;
+  let deposit_amount = 0;
+  let remaining_amount = 0;
+  let saw_deposit_line = false;
+
   // 1. Extract All Phones in the Text
   const phoneMatches = cleanRaw.match(EG_PHONE_REGEX);
   if (phoneMatches && phoneMatches.length > 0) {
@@ -109,23 +125,51 @@ export function parseOrderText(
     }
   }
 
-  // Check for inline money pattern like: "750 ج" or "600 جنيه" or "EGP 500" or "750ج"
-  const moneyMatch = cleanRaw.match(/(\d+(?:\.\d+)?)\s*(?:ج|جنيه|ج\.م|egp|le)(?:[\s,،.-]|$)/i);
-  if (moneyMatch) {
-    order_total = parseFloat(moneyMatch[1]) || 0;
-  }
-
   // 2. Identify Lines with Labels & Process
   const unhandledLines: string[] = [];
 
-  for (const line of lines) {
+  for (let idx = 0; idx < lines.length; idx++) {
+    const line = lines[idx];
+
     // Phone Label Line (consume without leaking to unhandled or notes)
-    if (/^(?:الموبايل|الموبيل|الهاتف|التليفون|فون|رقم الهاتف|رقم الموبايل|تليفون)\s*[:=-]/i.test(line)) {
+    if (
+      /^(?:رقم\s*)?(?:الموبايل|الموبيل|الهاتف|التليفون|التلفون|تلفون|تليفون|موبايل|فون)\s*(?:اضافي|اضافى|اخر|تانى|ثاني)?\s*[:=-]?/i.test(
+        line
+      ) ||
+      /^(?:رقم\s*(?:اضافي|اضافى|اخر|تانى|ثاني))\s*[:=-]?/i.test(line)
+    ) {
+      saw_deposit_line = false;
+      continue;
+    }
+
+    // Standalone Phone Line (consume directly)
+    const cleanDigits = line.replace(/[\s-]/g, "");
+    if (/^(?:\+?20|0)?1[0125]\d{8}$/.test(cleanDigits)) {
+      saw_deposit_line = false;
+      continue;
+    }
+
+    // Intro / Preamble Line (e.g. "ال 4 جرابات دول للعميلة دي", "ال 4 جرابات دول للعميل ده")
+    const isIntroLine =
+      /^(?:ال|دول)?\s*\d*\s*(?:جرابات|جراب|اوردر|أوردر|طلب|طرد|شحنة|شحنه|كفر|كفرات|ساعة|ساعات|ساعه|سماعة|سماعه|منتجات|صنف|قطعة|قطع)/i.test(
+        line
+      ) || /(?:للعميل|للعميلة|للزبون|للكستمر)/i.test(line);
+
+    if (isIntroLine) {
+      saw_deposit_line = false;
+      if (!items_summary) {
+        const cleanedItem = line
+          .replace(/^(?:ال|دول)\s*/i, "")
+          .replace(/(?:دول\s*)?(?:للعميل|للعميلة|للزبون|للكستمر).*$/i, "")
+          .trim();
+        items_summary = cleanedItem || line;
+      }
       continue;
     }
 
     // Customer Name Label
     if (/^(?:الاسم|اسم العميل|العميل|اسم المستلم|المستلم)\s*[:=-]\s*(.*)$/i.test(line)) {
+      saw_deposit_line = false;
       const match = line.match(/^(?:الاسم|اسم العميل|العميل|اسم المستلم|المستلم)\s*[:=-]\s*(.*)$/i);
       if (match && match[1]) {
         customer_name = cleanCustomerName(match[1]);
@@ -135,6 +179,7 @@ export function parseOrderText(
 
     // Explicit Governorate Label
     if (/^(?:المحافظه|المحافظة)\s*[:=-]\s*(.*)$/i.test(line)) {
+      saw_deposit_line = false;
       const match = line.match(/^(?:المحافظه|المحافظة)\s*[:=-]\s*(.*)$/i);
       if (match && match[1]) {
         const govResult = matchGovernorate(match[1], ratesList);
@@ -145,8 +190,26 @@ export function parseOrderText(
       }
     }
 
+    // Standalone Governorate Line (e.g. "الدقهليه", "الشرقية", "محافظة القاهرة")
+    const strippedGovCandidate = line.replace(/^(?:محافظة|محافظه)\s*/i, "").trim();
+    const isNotStreetOrBuilding = !/(?:شارع|ش\b|عمارة|عماره|شقة|شقه|دور|برج|ميدان|طريق|بجوار|امام|أمام|خلف|قرية|قريه|مركز)/i.test(
+      line
+    );
+    if (strippedGovCandidate && isNotStreetOrBuilding) {
+      const words = strippedGovCandidate.split(/\s+/).filter(Boolean);
+      if (words.length <= 3) {
+        const govCheck = matchGovernorate(strippedGovCandidate, ratesList);
+        if (govCheck.matched && govCheck.standardName) {
+          saw_deposit_line = false;
+          governorate = govCheck.standardName;
+          continue;
+        }
+      }
+    }
+
     // Explicit Address Label
     if (/^(?:العنوان|عنوان العميل|مكان التوصيل|المنطقة)\s*[:=-]\s*(.*)$/i.test(line)) {
+      saw_deposit_line = false;
       const match = line.match(/^(?:العنوان|عنوان العميل|مكان التوصيل|المنطقة)\s*[:=-]\s*(.*)$/i);
       if (match && match[1]) {
         address = match[1].trim();
@@ -154,35 +217,67 @@ export function parseOrderText(
       }
     }
 
-    // Landmark Label
-    if (/^(?:علامه مميزه|علامة مميزة|بجوار|امام|أمام|اقرب معلم)\s*[:=-]\s*(.*)$/i.test(line)) {
-      const match = line.match(/^(?:علامه مميزه|علامة مميزة|بجوار|امام|أمام|اقرب معلم)\s*[:=-]\s*(.*)$/i);
-      if (match && match[1]) {
-        landmark = match[1].trim();
+    // Landmark Label / Additional Landmark Line
+    if (/^(?:و?علامه مميزه|و?علامة مميزة|و?بجوار|و?امام|و?أمام|و?خلف|و?جنب|و?عند|و?اقرب معلم)\s*[:=-]?\s*(.*)$/i.test(line)) {
+      saw_deposit_line = false;
+      const match = line.match(
+        /^(?:و?علامه مميزه|و?علامة مميزة|و?بجوار|و?امام|و?أمام|و?خلف|و?جنب|و?عند|و?اقرب معلم)\s*[:=-]?\s*(.*)$/i
+      );
+      const landmarkText = match && match[1] && match[1].length > 1 ? match[1].trim() : line.trim();
+      if (landmarkText) {
+        landmark = landmark ? `${landmark} - ${landmarkText}` : landmarkText;
         continue;
       }
     }
 
-    // Order Total / Price Label
+    // Deposit / Prepaid Line (e.g. "بعتت 300", "بعت 200", "حولت 100", "عربون: 300", "مدفوع 150")
+    if (/^(?:بعتت|بعت|حولت|حول|تم تحويل|مدفوع|عربون|مقدم|فودافون كاش|انستاباي|كاش|دفع)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i.test(line)) {
+      const match = line.match(/^(?:بعتت|بعت|حولت|حول|تم تحويل|مدفوع|عربون|مقدم|فودافون كاش|انستاباي|كاش|دفع)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i);
+      if (match && match[1]) {
+        deposit_amount = parseFloat(match[1]) || 0;
+        saw_deposit_line = true;
+        continue;
+      }
+    }
+
+    // Remaining / Balance / COD Line (e.g. "باقي 310", "الباقي 310", "متبقي 310", "الحساب: 310", "المطلوب 310")
     if (
-      /^(?:المبلغ|السعر|الحساب|المجموع|الاجمالي|الإجمالي|المطلوب|قيمة الاوردر|قيمه الاوردر)\s*[:=-]\s*(\d+(?:\.\d+)?)/i.test(
+      /^(?:باقي|الباقي|متبقي|المتبقي|الحساب|حساب|الخساب|المطلوب تحصيله|المطلوب|تحصيل|المبلغ المطلوب|سعر الاوردر|قيمة الاوردر|قيمه الاوردر)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i.test(
         line
       )
     ) {
       const match = line.match(
-        /^(?:المبلغ|السعر|الحساب|المجموع|الاجمالي|الإجمالي|المطلوب|قيمة الاوردر|قيمه الاوردر)\s*[:=-]\s*(\d+(?:\.\d+)?)/i
+        /^(?:باقي|الباقي|متبقي|المتبقي|الحساب|حساب|الخساب|المطلوب تحصيله|المطلوب|تحصيل|المبلغ المطلوب|سعر الاوردر|قيمة الاوردر|قيمه الاوردر)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i
       );
       if (match && match[1]) {
-        order_total = parseFloat(match[1]) || 0;
+        remaining_amount = parseFloat(match[1]) || 0;
+        saw_deposit_line = false;
         continue;
       }
     }
 
-    // Paid / Deposit Label
-    if (/^(?:مدفوع|عربون|مقدم|تم تحويل|فودافون كاش)\s*[:=-]\s*(\d+(?:\.\d+)?)/i.test(line)) {
-      const match = line.match(/^(?:مدفوع|عربون|مقدم|تم تحويل|فودافون كاش)\s*[:=-]\s*(\d+(?:\.\d+)?)/i);
+    // Standalone number on the line immediately following a deposit line (e.g. Line: "بعت 200", Next: "410")
+    if (saw_deposit_line && /^\s*(\d+(?:\.\d+)?)\s*(?:ج|جنيه|ج\.م|egp|le)?\s*$/i.test(line)) {
+      const match = line.match(/^\s*(\d+(?:\.\d+)?)/);
       if (match && match[1]) {
-        paid_amount = parseFloat(match[1]) || 0;
+        remaining_amount = parseFloat(match[1]) || 0;
+        saw_deposit_line = false;
+        continue;
+      }
+    }
+    saw_deposit_line = false;
+
+    // Explicit Total Label
+    if (
+      /^(?:المبلغ|السعر|المجموع|الاجمالي|الإجمالي)\s*[:=-]\s*(\d+(?:\.\d+)?)/i.test(
+        line
+      )
+    ) {
+      const match = line.match(
+        /^(?:المبلغ|السعر|المجموع|الاجمالي|الإجمالي)\s*[:=-]\s*(\d+(?:\.\d+)?)/i
+      );
+      if (match && match[1]) {
+        explicit_total = parseFloat(match[1]) || 0;
         continue;
       }
     }
@@ -209,8 +304,34 @@ export function parseOrderText(
     unhandledLines.push(line);
   }
 
-  // 3. Single-line or Unlabeled Compound Parser (When no labels were used)
-  // Check if first line or any line contains Name preceding the Phone Number anchor
+  // 3. Resolve Financial Figures (COD, Deposit, Remaining)
+  // Per business rule: When remaining (باقي) is present, it represents the exact COD account to collect.
+  // The deposit (بعتت / عربون) is already deducted and considered not part of courier collection.
+  if (remaining_amount > 0) {
+    order_total = remaining_amount;
+    paid_amount = 0;
+    if (deposit_amount > 0 && !important_notes.includes("عربون")) {
+      const depositNote = `عربون مدفوع: ${deposit_amount} ج`;
+      important_notes = important_notes ? `${important_notes} | ${depositNote}` : depositNote;
+    }
+  } else if (explicit_total > 0 && deposit_amount > 0) {
+    order_total = explicit_total;
+    paid_amount = deposit_amount;
+  } else if (explicit_total > 0) {
+    order_total = explicit_total;
+    paid_amount = 0;
+  } else if (deposit_amount > 0) {
+    order_total = deposit_amount;
+    paid_amount = 0;
+  } else {
+    // Fallback: check for inline money in the whole text like "750 ج" or "600 جنيه"
+    const moneyMatch = cleanRaw.match(/(\d+(?:\.\d+)?)\s*(?:ج|جنيه|ج\.م|egp|le)(?:[\s,،.-]|$)/i);
+    if (moneyMatch) {
+      order_total = parseFloat(moneyMatch[1]) || 0;
+    }
+  }
+
+  // 4. Single-line Name extraction before Phone anchor
   if (!customer_name && phone_primary) {
     for (let i = 0; i < unhandledLines.length; i++) {
       const line = unhandledLines[i];
@@ -218,12 +339,11 @@ export function parseOrderText(
       if (phoneIndex > 0) {
         const textBeforePhone = line.slice(0, phoneIndex).trim();
         const candidateWords = textBeforePhone.split(/\s+/).filter(Boolean);
-        const isNotAddress = !/(?:شارع|ش\b|عمارة|عماره|شقة|شقه|دور|برج|ميدان|طريق|بجوار|امام|خلف|قرية|قريه|مركز)/i.test(
+        const isNotAddress = !/(?:شارع|ش\b|عمارة|عماره|شقة|شقه|دور|برج|ميدان|طريق|بجوار|امام|أمام|خلف|قرية|قريه|مركز)/i.test(
           textBeforePhone
         );
         if (candidateWords.length >= 2 && candidateWords.length <= 5 && isNotAddress) {
           customer_name = cleanCustomerName(textBeforePhone);
-          // Replace what came before and including the phone from that line
           const textAfterPhone = line.slice(phoneIndex).replace(EG_PHONE_REGEX, "").trim();
           if (textAfterPhone) {
             unhandledLines[i] = textAfterPhone;
@@ -236,8 +356,31 @@ export function parseOrderText(
     }
   }
 
-  // 4. Fallback Heuristics for Unhandled Lines
-  // If governorate not yet found, check if address already contains a governorate/city alias
+  // 5. Fallback extract customer name from unhandled lines
+  if (!customer_name) {
+    for (let i = 0; i < unhandledLines.length; i++) {
+      const candidate = unhandledLines[i].replace(EG_PHONE_REGEX, "").trim();
+      const words = candidate.split(/\s+/).filter(Boolean);
+      const isAddressLike = /(?:شارع|ش\b|عمارة|عماره|شقة|شقه|دور|برج|ميدان|طريق|بجوار|امام|أمام|خلف|قرية|قريه|مركز|حي|منطقة|بلوك|بيت|مسجد)/i.test(
+        candidate
+      );
+      const isIntroOrItem = /(?:جراب|جرابات|اوردر|أوردر|طلب|طرد|شحنة|شحنه|كفر|كفرات|دول|للعميل|للعميلة|زبون|عميل|شحن|توصيل)/i.test(
+        candidate
+      );
+      const isProductModel = /^(?:redmi|iphone|samsung|oppo|realme|xiaomi|nokia|huawei|honor|vivo|infinix)\b/i.test(
+        candidate
+      );
+      const hasLotsOfDigits = /\d{2,}/.test(candidate);
+
+      if (words.length >= 2 && words.length <= 5 && !isAddressLike && !isIntroOrItem && !isProductModel && !hasLotsOfDigits) {
+        customer_name = cleanCustomerName(candidate);
+        unhandledLines.splice(i, 1);
+        break;
+      }
+    }
+  }
+
+  // 6. Fallback extract governorate from remaining lines
   if (!governorate && address) {
     const directMatch = matchGovernorate(address, ratesList);
     if (directMatch.matched && directMatch.standardName) {
@@ -256,11 +399,9 @@ export function parseOrderText(
     }
   }
 
-  // If governorate not yet found, search unhandled lines
   if (!governorate) {
     for (let i = 0; i < unhandledLines.length; i++) {
       const candidate = unhandledLines[i];
-      // Check whole line
       const directMatch = matchGovernorate(candidate, ratesList);
       if (directMatch.matched && directMatch.standardName) {
         governorate = directMatch.standardName;
@@ -268,7 +409,6 @@ export function parseOrderText(
         break;
       }
 
-      // Check tokens inside line
       const words = candidate.split(/[\s,،-]+/);
       for (const word of words) {
         if (word.length >= 3) {
@@ -285,28 +425,12 @@ export function parseOrderText(
     }
   }
 
-  // If customer_name still not found, check first remaining line
-  if (!customer_name) {
-    for (let i = 0; i < unhandledLines.length; i++) {
-      const candidate = unhandledLines[i].replace(EG_PHONE_REGEX, "").trim();
-      const words = candidate.split(/\s+/).filter(Boolean);
-      const isAddressLike = /(?:شارع|ش\b|عمارة|عماره|شقة|شقه|دور|برج|ميدان|طريق|بجوار|امام|خلف|قرية|قريه|مركز)/i.test(candidate);
-      const hasLotsOfDigits = /\d{2,}/.test(candidate);
-
-      if (words.length >= 2 && words.length <= 5 && !isAddressLike && !hasLotsOfDigits) {
-        customer_name = cleanCustomerName(candidate);
-        unhandledLines.splice(i, 1);
-        break;
-      }
-    }
-  }
-
-  // If address not found, check remaining lines for street/location keywords
+  // 7. Extract address from remaining lines
   if (!address) {
     const addressCandidates: string[] = [];
     for (let i = unhandledLines.length - 1; i >= 0; i--) {
       const candidate = unhandledLines[i];
-      const isAddressLike = /(?:شارع|ش\b|عمارة|عماره|شقة|شقه|دور|برج|ميدان|طريق|بجوار|امام|خلف|قرية|قريه|مركز|حي|منطقة|بلوك)/i.test(
+      const isAddressLike = /(?:شارع|ش\b|عمارة|عماره|شقة|شقه|دور|برج|ميدان|طريق|بجوار|امام|أمام|خلف|قرية|قريه|مركز|حي|منطقة|بلوك|بيت|مسجد|جمعية|كنيسة|عزبة|كفر)/i.test(
         candidate
       );
       if (isAddressLike) {
@@ -319,18 +443,16 @@ export function parseOrderText(
     }
   }
 
-  // If address is still empty and there are unhandled lines left, use the first/longest
   if (!address && unhandledLines.length > 0) {
     unhandledLines.sort((a, b) => b.length - a.length);
     address = unhandledLines.shift() || "";
   }
 
-  // Clean address from extracted phone numbers or raw price strings
   if (address) {
     address = address.replace(EG_PHONE_REGEX, "").replace(/(\d+(?:\.\d+)?)\s*(?:ج|جنيه|ج\.م|egp|le)\b/gi, "").trim();
   }
 
-  // Clean remaining lines into items or notes
+  // 8. Remaining lines become items or notes
   if (unhandledLines.length > 0) {
     const remainingText = unhandledLines.join(" | ").replace(EG_PHONE_REGEX, "").trim();
     if (!items_summary) {
@@ -420,7 +542,7 @@ export function parseBulkOrderText(
 ): ParsedOrderResult[] {
   if (!rawText || typeof rawText !== "string") return [];
 
-  const text = rawText.trim();
+  const text = convertArabicDigitsToEnglish(rawText).trim();
   if (!text) return [];
 
   // Delimiters: ---, ===, ***, ___, ###, or numbered headers like "1-", "2-", "أوردر 1", "طلب 1"

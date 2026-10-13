@@ -7,7 +7,7 @@ import {
 import {
   EGYPT_DISTRICTS_BY_GOVERNORATE,
   COMMON_MISCLASSIFICATION_RULES,
-  MisclassificationRule,
+  type MisclassificationRule,
 } from "./districtData";
 import type { GovernorateRate } from "../types/database";
 
