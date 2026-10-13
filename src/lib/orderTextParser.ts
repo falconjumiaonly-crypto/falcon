@@ -112,6 +112,7 @@ export function parseOrderText(
   let deposit_amount = 0;
   let remaining_amount = 0;
   let saw_deposit_line = false;
+  let explicit_notes_candidate = "";
 
   // 1. Extract All Phones in the Text
   const phoneMatches = cleanRaw.match(EG_PHONE_REGEX);
@@ -230,30 +231,24 @@ export function parseOrderText(
       }
     }
 
-    // Deposit / Prepaid Line (e.g. "بعتت 300", "بعت 200", "حولت 100", "عربون: 300", "مدفوع 150")
-    if (/^(?:بعتت|بعت|حولت|حول|تم تحويل|مدفوع|عربون|مقدم|فودافون كاش|انستاباي|كاش|دفع)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i.test(line)) {
-      const match = line.match(/^(?:بعتت|بعت|حولت|حول|تم تحويل|مدفوع|عربون|مقدم|فودافون كاش|انستاباي|كاش|دفع)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i);
-      if (match && match[1]) {
-        deposit_amount = parseFloat(match[1]) || 0;
-        saw_deposit_line = true;
-        continue;
-      }
-    }
+    // Check for remaining amount and deposit amount (supports compound lines like "بعت 300 باقي 400")
+    const remainingInLineMatch = line.match(
+      /(?:باقي|الباقي|متبقي|المتبقي|الحساب|حساب|الخساب|المطلوب تحصيله|المطلوب|تحصيل|المبلغ المطلوب|سعر الاوردر|قيمة الاوردر|قيمه الاوردر)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i
+    );
+    const depositInLineMatch = line.match(
+      /(?:بعتت|بعت|حولت|حول|تم تحويل|مدفوع|عربون|مقدم|فودافون كاش|انستاباي|كاش|دفع)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i
+    );
 
-    // Remaining / Balance / COD Line (e.g. "باقي 310", "الباقي 310", "متبقي 310", "الحساب: 310", "المطلوب 310")
-    if (
-      /^(?:باقي|الباقي|متبقي|المتبقي|الحساب|حساب|الخساب|المطلوب تحصيله|المطلوب|تحصيل|المبلغ المطلوب|سعر الاوردر|قيمة الاوردر|قيمه الاوردر)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i.test(
-        line
-      )
-    ) {
-      const match = line.match(
-        /^(?:باقي|الباقي|متبقي|المتبقي|الحساب|حساب|الخساب|المطلوب تحصيله|المطلوب|تحصيل|المبلغ المطلوب|سعر الاوردر|قيمة الاوردر|قيمه الاوردر)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i
-      );
-      if (match && match[1]) {
-        remaining_amount = parseFloat(match[1]) || 0;
+    if (remainingInLineMatch || depositInLineMatch) {
+      if (remainingInLineMatch && remainingInLineMatch[1]) {
+        remaining_amount = parseFloat(remainingInLineMatch[1]) || 0;
         saw_deposit_line = false;
-        continue;
       }
+      if (depositInLineMatch && depositInLineMatch[1]) {
+        deposit_amount = parseFloat(depositInLineMatch[1]) || 0;
+        saw_deposit_line = true;
+      }
+      continue;
     }
 
     // Standalone number on the line immediately following a deposit line (e.g. Line: "بعت 200", Next: "410")
@@ -291,13 +286,24 @@ export function parseOrderText(
       }
     }
 
-    // Notes Label
-    if (/^(?:ملاحظات|ملاحظه|ملحوظة|تنبيه)\s*[:=-]\s*(.*)$/i.test(line)) {
-      const match = line.match(/^(?:ملاحظات|ملاحظه|ملحوظة|تنبيه)\s*[:=-]\s*(.*)$/i);
+    // Notes Label (e.g. "ملاحظات: ...", "تنبيه للمندوب: ...")
+    if (/^(?:ملاحظات|ملاحظه|ملحوظة|تنبيه|تنبيه للمندوب|تعليمات للمندوب)\s*[:=-]\s*(.*)$/i.test(line)) {
+      saw_deposit_line = false;
+      const match = line.match(/^(?:ملاحظات|ملاحظه|ملحوظة|تنبيه|تنبيه للمندوب|تعليمات للمندوب)\s*[:=-]\s*(.*)$/i);
       if (match && match[1]) {
-        important_notes = match[1].trim();
+        explicit_notes_candidate = match[1].trim();
         continue;
       }
+    }
+
+    // Fragile Line (consume directly so it doesn't leak into address or items)
+    if (isFragileItem(line) && line.trim().length <= 35) {
+      continue;
+    }
+
+    // Courier Alert / Delivery Timing Line (consume directly so it doesn't leak into address or items)
+    if ((isDeliveryTiming(line) || isCourierAlert(line)) && line.trim().length <= 80) {
+      continue;
     }
 
     // Line didn't have an explicit key-value label
@@ -307,13 +313,10 @@ export function parseOrderText(
   // 3. Resolve Financial Figures (COD, Deposit, Remaining)
   // Per business rule: When remaining (باقي) is present, it represents the exact COD account to collect.
   // The deposit (بعتت / عربون) is already deducted and considered not part of courier collection.
+  // Prices and deposits are strictly excluded from important_notes.
   if (remaining_amount > 0) {
     order_total = remaining_amount;
     paid_amount = 0;
-    if (deposit_amount > 0 && !important_notes.includes("عربون")) {
-      const depositNote = `عربون مدفوع: ${deposit_amount} ج`;
-      important_notes = important_notes ? `${important_notes} | ${depositNote}` : depositNote;
-    }
   } else if (explicit_total > 0 && deposit_amount > 0) {
     order_total = explicit_total;
     paid_amount = deposit_amount;
@@ -452,17 +455,53 @@ export function parseOrderText(
     address = address.replace(EG_PHONE_REGEX, "").replace(/(\d+(?:\.\d+)?)\s*(?:ج|جنيه|ج\.م|egp|le)\b/gi, "").trim();
   }
 
-  // 8. Remaining lines become items or notes
+  // 8. Remaining lines become items summary if not already set (excluding prices and courier notes)
   if (unhandledLines.length > 0) {
-    const remainingText = unhandledLines.join(" | ").replace(EG_PHONE_REGEX, "").trim();
-    if (!items_summary) {
-      items_summary = remainingText;
-    } else if (!important_notes) {
-      important_notes = remainingText;
-    } else {
-      important_notes += " | " + remainingText;
+    const candidateItemLines = unhandledLines.filter(
+      (l) => !isPriceOrProductOnly(l) && !isDeliveryTiming(l) && !isCourierAlert(l)
+    );
+    if (!items_summary && candidateItemLines.length > 0) {
+      items_summary = candidateItemLines.join(" | ").replace(EG_PHONE_REGEX, "").trim();
     }
   }
+
+  // 9. Build Strictly Filtered Courier Notes (Important Notes)
+  // Per business rule: ONLY delivery timing (معاد), courier alerts/instructions (تنبيه للمندوب), or fragile (ضد الكسر).
+  // Strictly EXCLUDE prices, deposits, totals, and product items.
+  const courierNotesList: string[] = [];
+
+  // A) Fragile Check ("ضد الكسر")
+  if (isFragileItem(cleanRaw)) {
+    courierNotesList.push("ضد الكسر");
+  }
+
+  // B) Explicit Notes Label (e.g. "ملاحظات: التسليم بعد 5")
+  if (explicit_notes_candidate) {
+    const cleaned = explicit_notes_candidate
+      .replace(/^(?:ملاحظات|ملاحظه|ملحوظة|تنبيه|تنبيه للمندوب|تعليمات للمندوب)\s*[:=-]?\s*/i, "")
+      .trim();
+    if (cleaned && !isPriceOrProductOnly(cleaned)) {
+      if (isDeliveryTiming(cleaned) || isCourierAlert(cleaned) || isFragileItem(cleaned)) {
+        if (!courierNotesList.some((n) => n.includes(cleaned) || cleaned.includes(n))) {
+          courierNotesList.push(cleaned);
+        }
+      }
+    }
+  }
+
+  // C) Scan all raw lines for delivery timing or courier instructions
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t || isPriceOrProductOnly(t)) continue;
+
+    if (isDeliveryTiming(t) || isCourierAlert(t)) {
+      if (!courierNotesList.some((n) => n.includes(t) || t.includes(n))) {
+        courierNotesList.push(t);
+      }
+    }
+  }
+
+  important_notes = courierNotesList.join(" | ");
 
   // Smart Address & District Auto-Standardizer
   let detectedDistrict = "";
@@ -520,6 +559,83 @@ export function parseOrderText(
       total: Boolean(order_total > 0),
     },
   };
+}
+
+/**
+ * Check if text contains delivery timing / appointment keywords ("معاد")
+ */
+function isDeliveryTiming(text: string): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  return (
+    /(?:معاد|ميعاد|توقيت|وقت|الساعة|الساعه|صباحا|صباحاً|مساء|مساءً|ظهرا|ظهراً|عصرا|عصراً|التسليم|الاستلام|التوصيل|يوصل|توصل)\s*(?:بعد|قبل|الساعة|الساعه|يوم|السبت|الاحد|الأحد|الاثنين|الإثنين|الثلاثاء|الاربعاء|الأربعاء|الخميس|الجمعة|الجمعه|\d+)/i.test(
+      t
+    ) ||
+    /(?:بعد|قبل)\s+(?:الساعة|الساعه|\d+)/i.test(t) ||
+    /(?:التسليم|الاستلام|التوصيل)\s+(?:صباحاً|صباحا|مساءً|مساء|بعد الظهر|قبل الظهر|يوم)/i.test(t) ||
+    /(?:التسليم|الاستلام)\s*(?:من|بين)\s*\d+\s*(?:لـ?|الى|إلى)\s*\d+/i.test(t)
+  );
+}
+
+/**
+ * Check if text contains courier instructions or alerts ("تنبيه للمندوب")
+ */
+function isCourierAlert(text: string): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  return (
+    /(?:تنبيه|ملحوظة|ملاحظة|ملاحظه|هام|تعليمات)\s*(?:للمندوب|للشحن|للكابتن|للموزع)?/i.test(t) ||
+    /(?:رن|اتصل|الاتصال|تواصل|كلم|كلمه)\s*(?:قبل|مع|علي|على|بالمستلم|بالعميل|قبل الوصول|قبل ما تروح|قبل التحرك|بـ?\d+)/i.test(
+      t
+    ) ||
+    /(?:ممنوع|عدم)\s*(?:فتح|الفتح|المعاينة|المعاينه|التسليم)/i.test(t) ||
+    /(?:معاينة|معاينه|مسموح الفتح|مسموح بالمعاينة|مسموح بالمعاينه|فتح الشحنة|فتح الشحنه|السماح بالفتح)/i.test(
+      t
+    ) ||
+    /(?:تسليم شخصي|شخصياً|لا تسلم للحارس|عدم تركها مع الحارس|تسليم يد بيد|برجاء الاتصال)/i.test(
+      t
+    )
+  );
+}
+
+/**
+ * Check if text mentions Fragile ("ضد الكسر")
+ */
+function isFragileItem(text: string): boolean {
+  if (!text) return false;
+  return /(?:ضد\s*الكسر|قابل\s*للكسر|قابلة\s*للكسر|حساس\s*للكسر|احذر\s*الكسر|محتوى\s*زجاج)/i.test(
+    text
+  );
+}
+
+/**
+ * Check if text is only price, deposit, currency, or product description (excluded from courier notes)
+ */
+function isPriceOrProductOnly(text: string): boolean {
+  if (!text) return true;
+  const t = text.trim();
+  // Price / Currency / Deposit
+  if (
+    /^(?:بعتت?|حولت?|عربون|مدفوع|مقدم|باقي|الباقي|متبقي|المتبقي|الحساب|المبلغ|السعر|الإجمالي|الاجمالي|المطلوب)\b/i.test(
+      t
+    ) ||
+    /^\d+\s*(?:ج|جنيه|ج\.م|egp|le)?$/i.test(t) ||
+    /^(?:عربون مدفوع|باقي \d+|الحساب \d+)/i.test(t)
+  ) {
+    return true;
+  }
+  // Product / Items / Quantities
+  if (
+    /^(?:ال|دول)?\s*\d*\s*(?:جراب|جرابات|كفر|كفرات|ساعة|ساعات|ساعه|سماعة|سماعه|منتج|منتجات|صنف|قطعة|قطع|اوردر|طلب|طرد|شحنة|شحنه)\b/i.test(
+      t
+    ) ||
+    /^(?:redmi|iphone|samsung|oppo|realme|xiaomi|nokia|huawei|honor|vivo|infinix)\b/i.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /**

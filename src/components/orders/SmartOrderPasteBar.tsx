@@ -99,9 +99,7 @@ export function SmartOrderPasteBar({
       order_total: parsed.order_total > 0 ? String(parsed.order_total) : "",
       paid_amount: parsed.paid_amount > 0 ? String(parsed.paid_amount) : "0",
       shipping_cost: matchedRate !== null ? String(matchedRate) : "",
-      important_notes: [parsed.items_summary, parsed.important_notes]
-        .filter(Boolean)
-        .join(" | "),
+      important_notes: parsed.important_notes || "",
     });
 
     setCopiedSuccess(true);

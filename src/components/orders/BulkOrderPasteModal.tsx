@@ -118,7 +118,7 @@ export function BulkOrderPasteModal({
         order_total: p.order_total,
         paid_amount: p.paid_amount,
         shipping_cost: shipCost,
-        important_notes: [p.items_summary, p.important_notes].filter(Boolean).join(" | "),
+        important_notes: p.important_notes || "",
         isValid: errors.length === 0,
         errors,
       };
